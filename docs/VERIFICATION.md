@@ -47,7 +47,7 @@ Parquet tamper detection). This is the first run with real pytest and real pyarr
 3. **Parquet byte-determinism** is verified within one pyarrow version only. `data_version`
    (content hash) is designed to be pyarrow-independent, but the file bytes are not.
 4. **Native Windows** is not a supported environment (see ENVIRONMENT.md).
-5. `ruff` and `mypy` are installed via `[dev]` but have never been run.
+5. ~~`ruff` and `mypy` never run~~ → baseline recorded in **V3** below.
 
 ## V2 — Real Binance smoke ingestion (2026-09-28)
 
@@ -95,3 +95,58 @@ header row, spot/perp descriptive statistics (bps difference, volume ratio).
 - Spot vs perp **cannot** be told apart by filename; correctness relies on the separate folders
   used by the script. The "not identical" check only catches duplicated files, not swapped folders.
 - The spot/perp numbers printed by the script are descriptive, not a research result.
+
+## V3 — Lint and type-check baseline (2026-09-28)
+
+**Status: BASELINE RECORDED — 0 runtime/logic bugs found. No files changed; `--fix` was NOT run.**
+Run by the user in the V1 environment on commit `fac4954ee94c1c2a8d3429f24d41307eb59076cb`
+(tag `phase2-verified`); `git status --short` clean before and after. Classification by Claude,
+decision **A**: no code change before PHASE 3.
+
+| Item | Value |
+|---|---|
+| ruff | 0.16.9 — `ruff check . --output-format=concise` → 41 findings, exit 1 (35 auto-fixable, not applied) |
+| mypy | 2.3.1 — `mypy btc_trading_system --show-error-codes` → 18 errors in 9 files (31 source files checked), exit 1 |
+
+| Category | ruff | mypy | Total |
+|---|---|---|---|
+| 1. Real runtime/logic bug | 0 | 0 | **0** |
+| 2. Wrong/incomplete type annotation | 0 | 7 | 7 |
+| 3. Missing external stubs / environment | 0 | 11 | 11 |
+| 4. Lint/style/modernisation, production code | 14 | 0 | 14 |
+| 5. Test code only | 27 | 0 | 27 |
+| **Total** | **41** | **18** | **59** |
+
+**Category 2 (7, mypy)** — mypy cannot prove invariants the code guarantees; edge cases were
+executed and none fail:
+- `config/settings.py:85,86` — `validation_until` may be `None`: impossible, line 81 raises
+  `ConfigError` unless both or neither are set (all four combinations executed).
+- `config/settings.py:168,171,173,177` — `env` annotated `dict | None` but receives `os.environ`
+  (a `Mapping`); correct annotation is `Mapping[str, str] | None`. `env=None` path executed: gate
+  raises `LiveTradingNotAllowed` as intended.
+- `data/binance_reader.py:85` — `_ISO.match(v)` may be `None`: impossible, lines 82–84 raise
+  `MalformedDataError` first (executed with garbage and empty input).
+- Not reported by any tool, same category: `data/schema.py` `to_epoch_ns` is annotated as returning
+  a pandas ExtensionArray but returns a numpy int64 array; `to_epoch_ms` has no return annotation.
+
+**Category 3 (11, mypy)** — `pandas` ×8 (no `pandas-stubs`), `yaml` ×1 (no `types-PyYAML`),
+`pyarrow`/`pyarrow.parquet` ×2 (no type information shipped).
+**Consequence:** without pandas stubs every pandas value is `Any`, so mypy has effectively **not**
+type-checked the data layer. Evidence for data-layer correctness is the test suite (V1), the mutation
+checks and the real-data run (V2), not mypy.
+
+**Category 4 (14, ruff, production)** — I001 ×6, UP035 ×3, UP017 ×2, UP037 ×2 (one is the
+`schema.py` annotation above), FURB162 ×1 (`settings.py:131`, `Z` replacement redundant on Python
+≥ 3.11; behaviour verified identical), RUF100 ×1 (unused `noqa` in `binance_reader.py:94`; the
+broad `except` re-raises as `MalformedDataError`, not silent).
+
+**Category 5 (27, ruff, tests)** — I001 ×9, F401 ×5, UP017 ×5, DTZ001 ×2 (intentional naive
+datetimes in tests that assert rejection), F841 ×1 (leftover `span`; test coverage unaffected),
+RUF059 ×1, C408 ×1, SIM905 ×1, FURB167 ×1.
+
+### Open items from V3 (deferred, option B)
+- The repo has **no `[tool.ruff]` / `[tool.mypy]` configuration**; the enabled ruff rule set came from
+  the tool version or a user-level config, so this lint result is not reproducible from the repo alone.
+- Possible later maintenance commit: annotation fixes (category 2), ruff/mypy config, `pandas-stubs`
+  and `types-PyYAML` in `[dev]`, test clean-up. It changes the code fingerprint and requires a full
+  re-verification (pytest + ruff + mypy); adding `pandas-stubs` is expected to surface new mypy findings.
