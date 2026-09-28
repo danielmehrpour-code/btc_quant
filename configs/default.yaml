@@ -1,0 +1,26 @@
+market:
+  symbol: BTCUSDT
+  venue: binance
+  instrument: spot        # spot | perp  (futures med förfall: ej stött ännu)
+timeframe:
+  primary: 15m
+risk:
+  risk_per_trade: 0.005
+  max_leverage: 1.0
+  max_daily_loss: 0.02
+  max_drawdown: 0.20
+execution:
+  slippage_model: fixed
+  slippage_bps: 5.0
+  taker_fee_bps: 5.0
+  maker_fee_bps: 2.0
+  min_latency_bars: 1     # order kan tidigast fyllas 1 bar efter signal
+trading:
+  live: false
+  paper: false
+data_split:
+  # Exklusiva gränser i UTC. PLATSHÅLLARE tills faktisk datalängd är känd.
+  # TRAIN = [start, train_until)   VALIDATION = [train_until, validation_until)
+  # FINAL TEST = [validation_until, slut)  -> får ej röras vid optimering
+  train_until: "2023-01-01T00:00:00Z"
+  validation_until: "2024-01-01T00:00:00Z"
