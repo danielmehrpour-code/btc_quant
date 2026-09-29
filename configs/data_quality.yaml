@@ -1,0 +1,27 @@
+# configs/data_quality.yaml — LÅST (Phase 3). Ändring kräver synligt beslut + uppdaterad hash i test.
+version: 1
+invariants:
+  vwap_rel_tol: 1.0e-6
+  taker_abs_tol: 1.0e-8
+  taker_rel_tol: 1.0e-12
+anomalies:
+  window_min_days: 7
+  window_min_bars: 100
+  min_obs_fraction: 0.5
+  return_z_threshold: 10.0
+  return_scale_floor: 1.0e-5
+  range_ratio_threshold: 20.0
+  range_floor: 1.0e-5
+  volume_ratio_threshold: 50.0
+  stale_min_minutes: 30
+  stale_min_bars: 3
+consistency:
+  agg_abs_tol: 1.0e-8
+  agg_rel_tol: 1.0e-9
+  basis_warn_bps: 300.0
+  basis_fail_bps: 1000.0
+  lag_max_bars: 3
+  lag_min_pairs: 500
+  lag_min_corr0: 0.5
+replay:
+  max_timeframe: 4h
