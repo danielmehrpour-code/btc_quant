@@ -150,3 +150,83 @@ RUF059 ×1, C408 ×1, SIM905 ×1, FURB167 ×1.
 - Possible later maintenance commit: annotation fixes (category 2), ruff/mypy config, `pandas-stubs`
   and `types-PyYAML` in `[dev]`, test clean-up. It changes the code fingerprint and requires a full
   re-verification (pytest + ruff + mypy); adding `pandas-stubs` is expected to surface new mypy findings.
+
+## V4 — PHASE 3 data quality (2026-09-29)
+
+**Status: PASSED - all automated verification criteria met.**
+Run by the user in WSL2 with `verify_phase3.sh`.
+No `phase3-verified` tag has been created.
+
+The data-quality report on real data contains one FAIL finding,
+`TF_AGGREGATION_MISMATCH` (perp 1m to 15m). It was investigated and
+classified as a source-data inconsistency. It is not a verification failure.
+
+### Artifacts
+
+- Code commit:
+  `6eef6c7393fc73e24f6a3e1c5e74fa9795a1e90c`
+- Patch `phase3.patch`, sha256:
+  `50e496bd1ed36f88935875cad4505f87bb402cdd7229cc0f93ec9ce33168b22b`
+- Verify script `verify_phase3.sh` (outside the repo), sha256:
+  `b7669a923eef9d557a0c663fac85dfd3724236fd43a41dbf7573ed9e30fcfa56`
+- Investigation script `investigate_tf_v1.py` (outside the repo), sha256:
+  `5a647a61b228c6c460bc1a446dc86b668410fcfd8f04919ac10802fb6e6cdb6d`
+- Log `verify_phase3_v2.log` (outside the repo), sha256:
+  `8bf336a351e99c50cdf5cb3db780fff3517a8538ac11292bf18bf7d76b1a0134`
+- Documentation `docs/DATA_QUALITY.md`, commit:
+  `b3e904ca4cc3cd4675a8122c5a1a6c6fa8b45ee9`
+
+### Environment
+
+- WSL2, Python 3.12.3
+- pandas 3.0.6, numpy 2.5.3, pyarrow 25.0.1
+- pytest 9.1.1, ruff 0.16.9, mypy 2.3.1
+
+### Automated checks
+
+- pytest: 247 passed, 0 failed, 0 skipped.
+- Causality tests: 20/20 passed.
+- Mutation tests: 19/19 caught.
+- ruff: 41 findings total, equal to the V3 baseline.
+  0 new findings in Phase 3 files.
+- mypy: 24 errors total = V3 baseline 18 + 6 expected `import-untyped`
+  (pandas/yaml) in Phase 3 files. No unexpected new errors.
+- Real Binance data: official `.CHECKSUM` verified for all files.
+- Reports on real data: two runs byte-identical; store untouched.
+
+### Real-data finding: `TF_AGGREGATION_MISMATCH`
+
+Data: BTCUSDT, January 2025, monthly 1m and 15m archives
+from data.binance.vision.
+
+- spot 1m to 15m: PASS. 2976/2976 windows checked, 0 mismatches.
+- perp 1m to 15m: FAIL. Exactly 3 mismatching windows:
+  1. `2025-01-14T13:30:00+00:00`
+  2. `2025-01-14T15:00:00+00:00`
+  3. `2025-01-29T01:30:00+00:00`
+
+### Investigation
+
+`investigate_tf_v1.py` reads the Binance zip files directly with `csv`
+and `Decimal`. It uses neither pandas nor Phase 2/Phase 3 aggregation code.
+
+- Phase 2 fidelity confirmed. All raw rows are present in the store.
+  0 values differ by more than 1 ULP (the verification criterion).
+  Max ULP per dataset:
+  - spot 1m: 0
+  - spot 15m: 1
+  - perp 1m: 0
+  - perp 15m: 0
+
+  This is not bit-identical for all datasets (spot 15m has max ULP 1).
+- Independent `Decimal` aggregation reproduced the same 3 perp mismatches
+  and 0 spot mismatches.
+- The validator reported the same 3 perp mismatches.
+
+**Classification:** source-data inconsistency between the Binance perp
+1m and 15m archives used for the test. It is not established which
+archive is correct. Alternative sources (Binance daily archives, REST,
+aggTrades) were not checked.
+
+The finding remains `FAIL`, as the locked specification requires.
+It was not downgraded.
