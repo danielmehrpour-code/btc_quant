@@ -140,6 +140,62 @@ python scripts/data_quality_report.py xinst   --store S --out O --timeframe 15m
 
 `--out` i eller under lagret vägras.
 
+## Verifiering (Phase 3 V2, WSL)
+
+Phase 3 V2-verifieringen uppfyllde **alla automatiska kriterier**. Den kördes med
+`verify_phase3.sh` i WSL2 med Python 3.12.3. Ingen verifieringstagg har skapats.
+
+| Post | Värde |
+|---|---|
+| Commit | `6eef6c7393fc73e24f6a3e1c5e74fa9795a1e90c` |
+| Patch SHA-256 | `50e496bd1ed36f88935875cad4505f87bb402cdd7229cc0f93ec9ce33168b22b` |
+| pytest | 247 passed, 0 failed, 0 skipped |
+| Kausalitet | 20/20 passed |
+| Mutationstester | 19/19 fångade |
+| Ruff | 41 fynd totalt, exakt Phase 2-baslinjen. 0 nya fynd i Phase 3-filer. |
+| mypy | 24 fel totalt: de befintliga 18 plus 6 förväntade `import-untyped`. Inga oväntade nya fel. |
+| Rapporter på riktig data | Två körningar var byte-identiska. Lagret var orört. |
+
+### Fynd på riktig Binance-data: `TF_AGGREGATION_MISMATCH`
+
+Data: BTCUSDT januari 2025, månadsarkiv för 1m och 15m från `data.binance.vision`.
+
+- **spot 1m till 15m: `PASS`.** 2976 av 2976 fönster kontrollerade, 0 avvikande.
+- **perp 1m till 15m: `FAIL`.** Exakt 3 fönster med `TF_AGGREGATION_MISMATCH`:
+  1. `2025-01-14T13:30:00+00:00`
+  2. `2025-01-14T15:00:00+00:00`
+  3. `2025-01-29T01:30:00+00:00`
+
+### Utredning (`investigate_tf_v1.py`)
+
+Avvikelsen utreddes med `investigate_tf_v1.py`, SHA-256
+`5a647a61b228c6c460bc1a446dc86b668410fcfd8f04919ac10802fb6e6cdb6d`. Skriptet läser
+Binance-zipfilerna direkt med `csv` och `Decimal`. Aggregeringen använder varken pandas
+eller kod från Phase 2 eller Phase 3.
+
+1. **Phase 2-trohet.** Varje rad i rådatan jämfördes med raden i lagret, för alla fält.
+   Inga rader saknades. Alla fyra dataset låg inom verifieringens kriterium, som är högst
+   1 ULP. Återgivningen är **inte** bitidentisk för alla dataset:
+
+   | Dataset | Max ULP |
+   |---|---|
+   | spot 1m | 0 |
+   | spot 15m | 1 |
+   | perp 1m | 0 |
+   | perp 15m | 0 |
+
+2. **Oberoende aggregering.** En exakt `Decimal`-aggregering av 1m-rådatan mot 15m-rådatan
+   gav samma 3 avvikande perp-fönster, och 0 för spot.
+3. **Validatorn.** Validatorns rapport anger samma 3 fönster.
+
+**Slutsats:** de använda perp-arkiven för 1m och 15m från Binance är inkonsistenta med
+varandra i dessa 3 fönster. Det är en inkonsistens i datakällan, inte ett fel i implementationen
+eller verifieringen. Det är **inte** fastställt vilket av arkiven som är korrekt. Tredje källor,
+som Binances dagsarkiv, REST-API:t och aggTrades, kontrollerades inte.
+
+Fyndet ligger kvar som **`FAIL`**. Den låsta specifikationen kräver att
+`TF_AGGREGATION_MISMATCH` är FAIL, och fyndet nedgraderas inte.
+
 ## Kända begränsningar
 
 - Omkastade spot- och perp-mappar kan inte upptäckas robust. Basis blir bara
@@ -151,3 +207,5 @@ python scripts/data_quality_report.py xinst   --store S --out O --timeframe 15m
 - Den tvärgående lag-kontrollen jämför bara avkastningar, inte nivåer.
 - Kontrollerna ser bara det som finns i lagret. Fel som Phase 2 redan har
   kasserat vid ingest syns inte här.
+- `tf_aggregation` avgör inte vilken källa som är rätt när 1m- och 15m-arkiven
+  inte stämmer med varandra. Den rapporterar bara att de är inkonsistenta (se avsnittet om verifiering).
