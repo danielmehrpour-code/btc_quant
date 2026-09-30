@@ -62,6 +62,17 @@ Live trading ska vara AV som standard.
 
 
 
+1.1 PRIMARY OBJECTIVE
+
+The primary objective of the system is to maximize realistic net trading profit. The system should actively seek the highest achievable profit supported by genuine market opportunities, after all realistic trading costs including fees, slippage, latency and funding costs where applicable. There is no predefined weekly or annual return target. Strategies must not increase apparent profitability through overfitting, look-ahead bias, data leakage, unrealistic execution assumptions or uncontrolled risk. Any strategy selected for deployment must demonstrate robust performance on unseen data through strict out-of-sample testing, walk-forward validation and predefined risk constraints.
+
+Clarifications:
+
+- Research first: this objective governs strategy research and selection. It does not change that the system is a research tool first and a trading bot later, or that live trading is off by default. If no strategy passes the out-of-sample, walk-forward and risk criteria, the correct outcome is to deploy nothing (cash).
+- Deployment decision: the system ranks and reports candidates; the decision to deploy is made by the owner, based on selection criteria that are pre-registered before the out-of-sample evaluation. This is consistent with "show differences without automatically choosing a winner".
+- Multiple testing: selection must account for the number of strategies, variants and parameter sets tried (e.g. Deflated Sharpe Ratio, White's Reality Check or Hansen's SPA test). All tried variants are logged, including discarded ones.
+- Profit as a distribution: net profit is evaluated with confidence intervals and drawdown distributions, and always within the predefined risk constraints (risk per trade, maximum drawdown, exposure and leverage limits). It is never judged by a single point estimate from one backtest.
+
 2. VIKTIGASTE PRINCIPEN
 
 Var skeptisk.
