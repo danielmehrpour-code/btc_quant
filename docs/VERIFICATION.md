@@ -230,3 +230,5 @@ aggTrades) were not checked.
 
 The finding remains `FAIL`, as the locked specification requires.
 It was not downgraded.
+
+Addendum (recorded 2026-09-30): after the owner's review, the tag phase3-verified was created at 6eef6c7.
