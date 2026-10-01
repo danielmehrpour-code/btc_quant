@@ -107,9 +107,35 @@ KAUSALITET GENOM REFS OCH SNAPSHOTS
   KRAV: reproducerbar forskning och backtester MÅSTE läsa via en snapshot
   (PinnedStore). read_current(as_of=t) är "senast kända data kapad vid t", inte
   point-in-time, och får aldrig användas för en backtest.
+
+INGEST MED LINEAGE (steg 4)
+  <root>/ingests/<ingest_id>.json   en oföränderlig post per ingest (0444, link), även för
+                                    upprepad ingest av identiskt innehåll; kedja via
+                                    seq + prev_ingest_id (typer och id: lineage.py).
+  Phase 2 ingest_dataset() körs OFÖRÄNDRAD mot en fail-closed fångstlagring (exakt ett
+  write; allt annat -> fel). Dess extra delas upp: CONTENT_DERIVED_KEYS går till
+  objektmanifestet, sources/duplicates_dropped ENDAST till ingest-posten. Vid återbruk
+  jämförs exakt innehållsnycklarna (avvikelse -> ObjectCorruptError). Den publika
+  publish_version är oförändrad (strikt M2); ingest använder en egen intern väg.
+  Ordning i ingest (under skrivarlåset):
+    1. Phase 2 (parsning, dedup, validering) - skriver ingenting
+    2. regressionsskydd: ny version som slutar tidigare än aktuell -> fel, om inte
+       allow_regression=True (sparas i postens params)
+    3. objektet publiceras eller verifieras fullt och återanvänds; katalograd
+    4. planerad ref_log-rad beräknas (skrivs inte)
+    5. ingest-posten -> tmp, fsync, link, fsync          (commit-punkt för lineage)
+    6. ref_log-raden och ref-filen via steg 3 (action="ingest", logg före ref)
+    7. katalogen synkas från filerna (refs, ref_log, ingest_events, ingest_sources)
+  Krasch mellan 5 och 6 lämnar EN väntande ingest: alla ref-/ingest-operationer vägrar
+  (PendingIngestError) tills complete_pending_ingest() anropas explicit. Den slutför bara
+  om posten är den sista, dess planerade ref_log-rad kan reproduceras exakt,
+  previous_data_version == ref-filens version (eller båda saknas) och objektet klarar
+  full verifiering igen; annars fel och ingen ändring. Kontrollen sker via en inlagd rad
+  i _load_ref_state och är en no-op när det inte finns några ingest-poster.
 """
 from __future__ import annotations
 
+import copy
 import errno
 import fcntl
 import fnmatch
@@ -130,6 +156,7 @@ from typing import Any, Literal
 import pandas as pd
 
 from btc_trading_system.core.types import TIMEFRAMES, require_utc
+from btc_trading_system.data.ingest import ingest_dataset
 from btc_trading_system.data.schema import DatasetKey
 from btc_trading_system.data.storage import (
     DatasetStore,
@@ -145,6 +172,12 @@ from btc_trading_system.data_validation.errors import (
 )
 from btc_trading_system.data_validation.ohlcv import check_ohlcv
 from btc_trading_system.database import catalog
+from btc_trading_system.database.lineage import (
+    CONTENT_DERIVED_KEYS,
+    IngestRecord,
+    check_content_extra,
+    split_ingest_extra,
+)
 from btc_trading_system.database.refs import (
     DatasetVersionRef,
     DataSnapshot,
@@ -184,6 +217,7 @@ _REF_LOG_KEYS = frozenset({"seq", "prev_entry_sha256", "dataset", "dataset_id", 
                            "previous_data_version", "action"})
 _REF_FILE_KEYS = frozenset({"format", "dataset", "dataset_id", "data_version", "ref_log_seq",
                             "ref_log_entry_sha256"})
+INGESTS_DIR = "ingests"
 
 
 class StoreError(DataError):
@@ -242,6 +276,18 @@ class DatasetNotInSnapshotError(DatasetNotFoundError):
     """Datasetet ingår inte i snapshoten; en PinnedStore läser aldrig något annat."""
 
 
+class PendingIngestError(StoreError):
+    """En ingest-post väntar på sin ref_log-rad; anropa complete_pending_ingest()."""
+
+
+class IngestCorruptError(DataIntegrityError):
+    """Ingest-poster och ref_log är inkonsistenta eller manipulerade."""
+
+
+class VersionRegressionError(StoreError):
+    """Ingesten skulle göra en version som slutar tidigare till aktuell (allow_regression=False)."""
+
+
 @dataclass(frozen=True)
 class CurrentRef:
     ref: DatasetVersionRef | None                    # None = ingen ref ännu
@@ -264,6 +310,13 @@ class RefUpdate:
 class SnapshotResult:
     snapshot: DataSnapshot
     outcome: Literal["created", "reused"]
+
+
+@dataclass(frozen=True)
+class IngestOutcome:
+    record: IngestRecord
+    ingest_id: str
+    record_sha256: str
 
 
 @dataclass(frozen=True)
@@ -458,6 +511,45 @@ def _current_from(ref_file: _RefFile | None, entries: tuple[_LogEntry, ...], did
     later = [e for e in ds_entries if e.seq > seq]
     return CurrentRef(ref_file.ref, seq, ref_file.ref_log_entry_sha256, ref_file.file_sha256,
                       pending=bool(later), pending_data_version=later[-1].ref.data_version if later else None)
+
+
+# ------------------------------------------------------------------ ingest (steg 4)
+class _CaptureStore(DatasetStore):
+    """Fail-closed ersättning för DatasetStore i Phase 2 ingest_dataset(): tar emot EXAKT ett
+    write(key, frame, extra) och skriver ingenting. Andra anrop eller ett andra write -> fel."""
+
+    def __init__(self, key: DatasetKey) -> None:           # ingen super().__init__: ingen rot/backend
+        self._expected_key = key
+        self._writes = 0
+        self.captured: tuple[pd.DataFrame, dict[str, Any]] | None = None
+
+    def write(self, key: DatasetKey, df: pd.DataFrame, extra: dict[str, Any]) -> dict[str, Any]:
+        self._writes += 1
+        if self._writes != 1:
+            raise StoreError("fångstlagring: mer än ett write-anrop")
+        if key != self._expected_key:
+            raise StoreError(f"fångstlagring: {key.relpath} != {self._expected_key.relpath}")
+        self.captured = (df.copy(), copy.deepcopy(extra))
+        return {}
+
+    @staticmethod
+    def _refuse(name: str) -> StoreError:
+        return StoreError(f"fångstlagring: otillåtet anrop {name}()")
+
+    def data_path(self, key: DatasetKey) -> Path:
+        raise self._refuse("data_path")
+
+    def manifest_path(self, key: DatasetKey) -> Path:
+        raise self._refuse("manifest_path")
+
+    def exists(self, key: DatasetKey) -> bool:
+        raise self._refuse("exists")
+
+    def read_manifest(self, key: DatasetKey) -> dict[str, Any]:
+        raise self._refuse("read_manifest")
+
+    def read(self, key: DatasetKey) -> tuple[pd.DataFrame, dict[str, Any]]:
+        raise self._refuse("read")
 
 
 # ------------------------------------------------------------------ lås
@@ -760,7 +852,96 @@ class VersionedStore:
                     or latest.previous_data_version != (current.ref.data_version if current is not None else None):
                 raise RefCorruptError(f"{latest.ref.key.relpath}: ref-filen och ref_log går inte ihop")
             pending = latest
+        self._check_ingests(entries)                     # steg 4: väntande/inkonsistent ingest
         return _RefState(log_bytes, entries, refs, pending)
+
+    # -------------------------------------------------------------- ingest-lineage: läsning (inget lås)
+    def _read_ingest_file(self, path: Path, ingest_id: str) -> tuple[IngestRecord, str]:
+        if path.is_symlink() or not path.is_file() or os.lstat(path).st_mode & 0o222:
+            raise IngestCorruptError(f"{path.name}: inte en skrivskyddad vanlig fil")
+        data = path.read_bytes()
+        try:
+            rec = IngestRecord.from_file_bytes(data, expected_id=ingest_id)
+        except (ValueError, TypeError) as e:
+            raise IngestCorruptError(f"{path.name}: {e}") from e
+        return rec, hashlib.sha256(data).hexdigest()
+
+    def _load_ingests(self) -> tuple[tuple[IngestRecord, str], ...]:
+        """Alla ingest-poster, strikt: filnamn = ingest_id, seq 1..n, prev_ingest_id-kedja."""
+        root = self.root / INGESTS_DIR
+        if not os.path.lexists(root):
+            return ()
+        if root.is_symlink() or not root.is_dir():
+            raise IngestCorruptError(f"{INGESTS_DIR}/ är inte en katalog")
+        out: list[tuple[IngestRecord, str]] = []
+        for p in sorted(root.iterdir()):
+            stem = p.name[:-5] if p.name.endswith(".json") else ""
+            if not catalog.is_sha256_hex(stem):
+                raise IngestCorruptError(f"okänd fil i {INGESTS_DIR}/: {p.name}")
+            out.append(self._read_ingest_file(p, stem))
+        out.sort(key=lambda item: item[0].seq)
+        prev: str | None = None
+        for i, (rec, _) in enumerate(out, start=1):
+            if rec.seq != i:
+                raise IngestCorruptError(f"ingest-poster: seq {rec.seq} på plats {i}")
+            if rec.prev_ingest_id != prev:
+                raise IngestCorruptError(f"ingest-post seq {i}: kedjan (prev_ingest_id) är bruten")
+            prev = rec.ingest_id
+        return tuple(out)
+
+    def read_ingest(self, ingest_id: str) -> IngestRecord:
+        """En ingest-post (strikt verifierad mot sitt id)."""
+        if not catalog.is_sha256_hex(ingest_id):
+            raise ValueError(f"ogiltigt ingest_id: {ingest_id!r}")
+        path = self.root / INGESTS_DIR / f"{ingest_id}.json"
+        if not os.path.lexists(path):
+            raise DatasetNotFoundError(f"ingest-post saknas: {ingest_id}")
+        return self._read_ingest_file(path, ingest_id)[0]
+
+    def ingest_history(self, key: DatasetKey | None = None) -> tuple[IngestRecord, ...]:
+        """Hela den verifierade ingest-kedjan, ev. filtrerad på dataset."""
+        records = tuple(rec for rec, _ in self._load_ingests())
+        if key is None:
+            return records
+        did = catalog.dataset_id(key)
+        return tuple(rec for rec in records if rec.ref.dataset_id == did)
+
+    @contextmanager
+    def _permit_pending_ingest(self) -> Iterator[None]:
+        """Endast för complete_pending_ingest(): läs tillståndet trots en väntande ingest."""
+        self._pending_ingest_permitted = True
+        try:
+            yield
+        finally:
+            self._pending_ingest_permitted = False
+
+    def _check_ingests(self, entries: tuple[_LogEntry, ...]) -> None:
+        """Anropas från _load_ref_state. No-op utan ingest-poster. Varje ref_log-post med
+        action=ingest hör till exakt en post med ref_outcome=changed och tvärtom; en
+        väntande ingest blockerar (PendingIngestError)."""
+        records = self._load_ingests()
+        if not records:
+            return
+        linked: set[int] = set()
+        for i, (rec, _) in enumerate(records):
+            if rec.ref_outcome != "changed":
+                continue
+            s = rec.ref_log_seq or 0
+            if s <= len(entries):
+                e = entries[s - 1]
+                if e.entry_sha256 != rec.ref_log_entry_sha256 or e.action != "ingest" or e.ref != rec.ref \
+                        or e.previous_data_version != rec.previous_data_version:
+                    raise IngestCorruptError(f"ingest-post seq {rec.seq}: ref_log seq {s} matchar inte")
+                linked.add(s)
+            elif i == len(records) - 1 and s == len(entries) + 1:
+                if not getattr(self, "_pending_ingest_permitted", False):
+                    raise PendingIngestError(f"väntande ingest (seq {rec.seq}); "
+                                             "anropa complete_pending_ingest() först")
+            else:
+                raise IngestCorruptError(f"ingest-post seq {rec.seq}: ref_log seq {s} saknas")
+        orphans = [e.seq for e in entries if e.action == "ingest" and e.seq not in linked]
+        if orphans:
+            raise IngestCorruptError(f"ref_log-poster med action=ingest utan ingest-post: {orphans}")
 
     # -------------------------------------------------------------- skrivning
     @contextmanager
@@ -1121,6 +1302,191 @@ class StoreWriter:
                 "WHERE snapshot_id = :sid ORDER BY dataset_id", {"sid": sid})]
             if tuple(row) != (file_sha256, len(members)) or have != members:
                 raise catalog.CatalogCorruptError(f"snapshot {sid}: katalogen avviker")
+
+    # -------------------------------------------------------------- ingest (steg 4)
+    def ingest(self, key: DatasetKey, files: list[str | Path] | tuple[str | Path, ...], *,
+               now: datetime, code_version: str, worktree_clean: bool | None,
+               fail_on_gaps: bool = False, allow_regression: bool = False) -> IngestOutcome:
+        """Phase 2-ingest (oförändrad) -> oföränderlig version + lineage-post -> ref
+        (action="ingest"). Varje anrop ger en ny post, även för identiskt innehåll."""
+        self._require_lock()
+        store = self._store
+        now = require_utc(now, "now")
+        if not isinstance(code_version, str) or not code_version:
+            raise ValueError("code_version måste anges (icke-tom sträng)")
+        if worktree_clean is not None and not isinstance(worktree_clean, bool):
+            raise ValueError("worktree_clean måste vara bool eller None")
+        state = store._load_ref_state()                  # väntande ingest -> PendingIngestError
+        if state.pending is not None:
+            raise PendingRefUpdateError("väntande ref-uppdatering; anropa complete_pending_ref_updates() först")
+        ingests = store._load_ingests()
+        # 1) Phase 2 oförändrad: parsning, filnamn, dedup, validering, gap-flaggor (skriver inget)
+        capture = _CaptureStore(key)
+        ingest_dataset(list(files), key.instrument, key.timeframe, capture, symbol=key.symbol,
+                       now=now, fail_on_gaps=fail_on_gaps)
+        if capture.captured is None:
+            raise StoreError("Phase 2 ingest lämnade inget dataset till fångstlagringen")
+        frame, extra = capture.captured
+        # 2) innehållsnycklar -> objektet, källor -> lineage (okänd nyckel -> ValueError)
+        content, sources, dropped = split_ingest_extra(extra)
+        check_content_extra(content)
+        canon = canonicalize(frame)
+        dv = content_hash(canon)
+        target = DatasetVersionRef(key, dv)
+        cur = state.refs.get(target.dataset_id)
+        previous = cur.ref.data_version if cur is not None else None
+        # regressionsskydd, före all skrivning
+        if previous is not None and previous != dv and not allow_regression:
+            current_info = store._verify_object(key, previous)[0]
+            new_last = canon["open_time"].iloc[-1].isoformat()
+            if _iso_to_ms(new_last) < _iso_to_ms(current_info.last_open_time):
+                raise VersionRegressionError(
+                    f"{key.relpath}: ny version slutar {new_last}, aktuell slutar "
+                    f"{current_info.last_open_time}; ange allow_regression=True om det är avsikten")
+        # 3) objektet: publicera, eller verifiera fullt och återanvänd
+        publication = self._publish_ingest_version(key, canon, dv, content)
+        # 4) planerad ref_log-rad (skrivs inte än)
+        line: bytes | None = None
+        entry: _LogEntry | None = None
+        if previous != dv:
+            line, entry = self._next_entry(state, target, previous, "ingest")
+        rec = IngestRecord(
+            seq=len(ingests) + 1, prev_ingest_id=ingests[-1][0].ingest_id if ingests else None,
+            ref=target, publication=publication,
+            ref_outcome="changed" if entry is not None else "unchanged",
+            previous_data_version=previous if entry is not None else dv,
+            ref_log_seq=entry.seq if entry is not None else None,
+            ref_log_entry_sha256=entry.entry_sha256 if entry is not None else None,
+            sources=sources, duplicates_dropped=dropped, now=now.isoformat(),
+            fail_on_gaps=fail_on_gaps, allow_regression=allow_regression,
+            code_version=code_version, worktree_clean=worktree_clean)
+        # 5) lineage-posten (commit-punkt för ingesten)
+        record_sha = self._publish_ingest_record(rec)
+        # 6) ref via steg 3 (logg före ref)
+        if line is not None and entry is not None:
+            self._append_ref_log(state, line, entry)
+            self._write_ref_file(target, entry)
+        # 7) katalog sist
+        self._sync_ref_catalog(store._load_ref_state())
+        self._sync_ingest_catalog(store._load_ingests())
+        return IngestOutcome(rec, rec.ingest_id, record_sha)
+
+    def complete_pending_ingest(self) -> IngestOutcome | None:
+        """Slutför EN väntande ingest (krasch efter ingest-posten, före ref_log-raden), explicit.
+        Kräver: sista posten, planerad ref_log-rad reproduceras exakt, previous_data_version
+        == ref-filens version (eller båda saknas) och objektet klarar full verifiering nu."""
+        self._require_lock()
+        store = self._store
+        with store._permit_pending_ingest():
+            state = store._load_ref_state()
+        if state.pending is not None:
+            raise PendingRefUpdateError("väntande ref-uppdatering; anropa complete_pending_ref_updates() först")
+        records = store._load_ingests()
+        if not records:
+            return None
+        rec, record_sha = records[-1]
+        if rec.ref_outcome != "changed" or (rec.ref_log_seq or 0) <= len(state.entries):
+            return None
+        cur = state.refs.get(rec.ref.dataset_id)
+        if rec.previous_data_version != (cur.ref.data_version if cur is not None else None):
+            raise IngestCorruptError(f"ingest seq {rec.seq}: previous_data_version matchar inte ref-filen")
+        line, entry = self._next_entry(state, rec.ref, rec.previous_data_version, "ingest")
+        if entry.seq != rec.ref_log_seq or entry.entry_sha256 != rec.ref_log_entry_sha256:
+            raise IngestCorruptError(f"ingest seq {rec.seq}: planerad ref_log-rad kan inte reproduceras")
+        info, manifest, _ = store._verify_object(rec.ref.key, rec.ref.data_version)
+        self._register(info, manifest)
+        self._append_ref_log(state, line, entry)
+        self._write_ref_file(rec.ref, entry)
+        self._sync_ref_catalog(store._load_ref_state())
+        self._sync_ingest_catalog(store._load_ingests())
+        return IngestOutcome(rec, rec.ingest_id, record_sha)
+
+    def _publish_ingest_version(self, key: DatasetKey, canon: pd.DataFrame, dv: str,
+                                content: dict[str, Any]) -> Literal["published", "reused"]:
+        """Ingest-vägen: som publish_version men vid återbruk jämförs ENDAST innehållsnycklarna
+        (P4-S4-01). Den publika publish_version är oförändrad (strikt M2)."""
+        check_content_extra(content)
+        store = self._store
+        target = store.object_dir(key, dv)
+        if os.path.lexists(target):
+            info, manifest, _ = store._verify_object(key, dv)   # ingest: aldrig blint återbruk
+            mine = json.loads(json.dumps({k: content[k] for k in sorted(CONTENT_DERIVED_KEYS)}))
+            stored = {k: manifest.get(k) for k in sorted(CONTENT_DERIVED_KEYS)}
+            if stored != mine:
+                raise ObjectCorruptError(f"{key.relpath}/{dv}: lagrade innehållsnycklar avviker från innehållet")
+            self._finish_dir(target)
+            self._register(info, manifest)
+            return "reused"
+        staging = self._new_staging()
+        try:
+            staged = self._stage(staging, key, canon, dv, content)
+            self._publish_dir(staged, target)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+        info, manifest, _ = store._verify_object(key, dv)
+        self._register(info, manifest)
+        return "published"
+
+    def _publish_ingest_record(self, rec: IngestRecord) -> str:
+        """tmp (0444) -> fsync -> link (aldrig överskrivning) -> fsync av katalogen."""
+        store = self._store
+        path = store.root / INGESTS_DIR / f"{rec.ingest_id}.json"
+        data = rec.to_file_bytes()
+        if os.path.lexists(path):
+            raise ImmutableObjectError(f"{path.name}: ingest-posten finns redan; skrivs aldrig över")
+        _mkdirs_durable(path.parent, store.root)
+        staged = store.tmp / f"{uuid.uuid4().hex}.ingest.json"
+        try:
+            with staged.open("xb") as f:
+                f.write(data)
+            os.chmod(staged, FILE_MODE)
+            _fsync_file(staged)
+            try:
+                _link(staged, path)                               # ingest-post: aldrig överskrivning
+            except FileExistsError as e:
+                raise ImmutableObjectError(f"{path.name}: ingest-posten finns redan; skrivs aldrig över") from e
+        finally:
+            staged.unlink(missing_ok=True)
+        _fsync_dir(path.parent)
+        return hashlib.sha256(data).hexdigest()
+
+    def _sync_ingest_catalog(self, records: tuple[tuple[IngestRecord, str], ...]) -> None:
+        """ingest_events/ingest_sources synkas från posterna i EN transaktion. En väntande
+        ingest (ref_log-raden saknas ännu) synkas inte."""
+        conn = self._conn
+        n_entries = len(parse_ref_log(self._store._read_ref_log()))
+        ev_cols = ("seq", "ingest_id", "record_sha256", "dataset_id", "data_version",
+                   "previous_data_version", "params_json", "code_version", "worktree_clean",
+                   "publication", "ref_outcome", "ref_log_seq", "duplicates_dropped")
+        src_cols = ("ingest_seq", "source_index", "name", "sha256", "rows")
+        with catalog.transaction(conn):
+            have = {r[0]: tuple(r) for r in conn.execute(f"SELECT {', '.join(ev_cols)} FROM ingest_events")}
+            have_src: dict[int, list[tuple[Any, ...]]] = {}
+            for r in conn.execute(f"SELECT {', '.join(src_cols)} FROM ingest_sources "
+                                  "ORDER BY ingest_seq, source_index"):
+                have_src.setdefault(r[0], []).append(tuple(r))
+            synced: set[int] = set()
+            for rec, sha in records:
+                if rec.ref_log_seq is not None and rec.ref_log_seq > n_entries:
+                    continue                                      # väntande ingest
+                row = (rec.seq, rec.ingest_id, sha, rec.ref.dataset_id, rec.ref.data_version,
+                       rec.previous_data_version, compact_json_bytes(rec.params).decode("ascii"),
+                       rec.code_version, None if rec.worktree_clean is None else int(rec.worktree_clean),
+                       rec.publication, rec.ref_outcome, rec.ref_log_seq, rec.duplicates_dropped)
+                srcs = [(rec.seq, i, s.name, s.sha256, s.rows) for i, s in enumerate(rec.sources)]
+                synced.add(rec.seq)
+                if rec.seq in have:
+                    if have[rec.seq] != row or have_src.get(rec.seq, []) != srcs:
+                        raise catalog.CatalogCorruptError(f"ingest seq {rec.seq}: katalogen avviker")
+                    continue
+                conn.execute(f"INSERT INTO ingest_events ({', '.join(ev_cols)}) "
+                             f"VALUES ({', '.join(':' + c for c in ev_cols)})",
+                             dict(zip(ev_cols, row, strict=True)))
+                conn.executemany(f"INSERT INTO ingest_sources ({', '.join(src_cols)}) "
+                                 f"VALUES ({', '.join(':' + c for c in src_cols)})",
+                                 [dict(zip(src_cols, r, strict=True)) for r in srcs])
+            if set(have) - synced:
+                raise catalog.CatalogCorruptError("katalogen har ingest_events som saknas i filerna")
 
 
 class PinnedStore:
