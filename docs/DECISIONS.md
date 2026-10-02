@@ -30,6 +30,7 @@ Authoritative scope: `docs/MASTER_SPEC.md`. Phase 4 scope: `docs/PHASE4_SPEC.md`
 | G-14 | All | `CLAUDE.md` in the repo root holds the project instructions for Claude Code: rules and pointers only (project, authoritative documents, working process G-12, rules G-11/G-13, protected items, verification commands, environment). It never copies spec or decision text; the documents in `docs/` stay authoritative and win over `CLAUDE.md`. If documents in `docs/` conflict with each other, stop and ask the owner; never choose yourself. It is a doc (mode `100644`, G-07) and outside the code fingerprint. | Gives every session the same rules without creating a parallel spec (G-06). | owner decision 2026-10-01 |
 | G-15 | All | Quality and correctness are the only criteria for every decision. Every check, test, review and verification is always carried out in full. Complexity is added only where it serves correctness, reproducibility, causality, realistic execution or safety; complexity without a clear function is avoided. | The goal is the most reliable and best possible research platform. | owner decision 2026-10-01 |
 | G-16 | All | Clarifies G-12: G-12 applies to work products (scratchpad, overlays, mutation runs and their results). pytest's own disposable test directories may stay in pytest's default location. | Work products must survive a restart; pytest's disposable directories need not. | owner decision 2026-10-01 |
+| G-17 | All | `docs/MASTER_SPEC.md` section 1.2 NET PROFIT LEVERS AND RESEARCH PROTOCOL is added (items 1–8: data split locked before Phase 5, real trading costs, limit orders with a conservative fill model, data beyond OHLCV, position sizing and risk, benchmarks, several uncorrelated strategies, taxes). Its numeric values and dates are locked at the phase it states, and each item is recorded here when it is locked. | The levers serve 1.1 (realistic net profit) and are fixed before any result they could influence. | owner decision 2026-10-02; `docs/MASTER_SPEC.md:76` |
 
 ## Phase 1–2: causality, execution contract, data layer
 
@@ -39,6 +40,7 @@ Authoritative scope: `docs/MASTER_SPEC.md`. Phase 4 scope: `docs/PHASE4_SPEC.md`
 | P1-02 | 1 | Signal → order → fill are causally ordered; the fill is strictly after the order (`min_latency_bars >= 1`, no same-bar fill), at the next bar's price plus slippage. | "Signal price = fill price" is forbidden. | `docs/LOOKAHEAD_POLICY.md:4`, `btc_trading_system/config/settings.py:104-105`, `btc_trading_system/core/types.py:120-133` |
 | P1-03 | 1 | Data split uses exclusive UTC bounds (TRAIN / VALIDATION / FINAL TEST); parameters are chosen on TRAIN, compared on VALIDATION, and FINAL TEST is touched once. | Prevents selection on test data. | `docs/LOOKAHEAD_POLICY.md:8`, `configs/default.yaml:21-26` |
 | P1-04 | 1 → 6/7 | "data_split dates are placeholders; they must be locked in their own commit before the first strategy evaluation on real data (Phase 6/7), before any strategy result is seen. The Dec 2024-Jan 2025 period was used only for data quality checks, not for strategy results." | The split must be fixed before any result can influence it. | owner decision 2026-09-30; `configs/default.yaml:22` |
+| P1-05 | 1 → before 5 | Supersedes the timing in P1-04 (G-13): the `data_split` dates (TRAIN / VALIDATION / FINAL TEST) are locked in their own commit before Phase 5 (features) starts, before any feature or strategy result exists. The owner chooses the dates. The rest of P1-04 stands. | Feature results can influence the split just as strategy results can. | master spec 1.2 item 1 (`docs/MASTER_SPEC.md:80`); owner decision 2026-10-02 |
 | P2-01 | 2 | `data_version` = sha256 over a canonical byte encoding of the content (fixed column order, dtypes and row order), independent of the pyarrow version. | Logical identity must not depend on the file format. | `btc_trading_system/data/storage.py:6-7` |
 | P2-02 | 2 | Code fingerprint = sha256 over `sha256sum` of every file in `btc_trading_system/ tests/ configs/ scripts/ pyproject.toml`; `docs/` is excluded. | Documentation can change without invalidating a verification. | `docs/VERIFICATION.md:23-30` |
 | V3-A | after 2 | Decision A: no code change before Phase 3 for the V3 lint/type findings; fixes are deferred (option B) to a possible later maintenance commit. | 0 runtime bugs; fixes would change the fingerprint and need full re-verification. | `docs/VERIFICATION.md:104`, `docs/VERIFICATION.md:147-152` |
@@ -173,7 +175,7 @@ Line references are to this commit.
 
 ## UNCERTAIN (for the owner to decide; not decisions)
 
-None open. U-01 to U-07 were resolved by the owner on 2026-09-30:
+One open: U-08 (below). U-01 to U-07 were resolved by the owner on 2026-09-30:
 
 | ID | Resolution |
 |---|---|
@@ -184,3 +186,9 @@ None open. U-01 to U-07 were resolved by the owner on 2026-09-30:
 | U-05 | Not locked; placeholders until their own commit: P1-04. |
 | U-06 | General rule: G-08. |
 | U-07 | Yes: this log is the accepted record for G-06, G-07 and P4-S2-04 (see the introduction). |
+
+Open:
+
+| ID | Open owner decision | Until decided | Source |
+|---|---|---|---|
+| U-08 | Whether to start recording the order book continuously (master spec 1.2 item 4). | Nothing is recorded. | owner decision 2026-10-02; `docs/MASTER_SPEC.md:86` |

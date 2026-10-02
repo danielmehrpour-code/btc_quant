@@ -73,6 +73,26 @@ Clarifications:
 - Multiple testing: selection must account for the number of strategies, variants and parameter sets tried (e.g. Deflated Sharpe Ratio, White's Reality Check or Hansen's SPA test). All tried variants are logged, including discarded ones.
 - Profit as a distribution: net profit is evaluated with confidence intervals and drawdown distributions, and always within the predefined risk constraints (risk per trade, maximum drawdown, exposure and leverage limits). It is never judged by a single point estimate from one backtest.
 
+1.2 NET PROFIT LEVERS AND RESEARCH PROTOCOL
+
+These requirements serve 1.1. Numeric values and dates are locked at the phase stated, before any result that they could influence has been seen. Each item is recorded in docs/DECISIONS.md when it is locked.
+
+1. Data split locked before Phase 5. The TRAIN, VALIDATION and FINAL TEST periods are locked in their own commit before Phase 5 (features) starts, before any feature or strategy result exists. FINAL TEST is the most recent period that no feature, strategy or parameter choice has seen. It is used once, for the final evaluation of the candidates selected on VALIDATION. The owner chooses the dates. This tightens the timing of P1-04.
+
+2. Real trading costs as configuration (Phases 6 and 9). Every evaluation uses the owner's actual costs: Binance fee tier (maker and taker), any BNB discount, spread, slippage and funding for perpetuals. Every evaluation also reports a stress case with clearly higher costs, and the break-even cost: the fee and slippage level at which the net edge disappears. A strategy whose edge disappears under a modest cost increase is not robust.
+
+3. Limit orders and a conservative fill model (Phases 6 and 9, extends P6-01). Maker (limit) orders are allowed, but their fills are modelled conservatively: a limit order is filled only if the market trades through the price, not merely touches it; the queue position is unknown and assumed unfavourable; and adverse selection is modelled (limit orders fill more often when the price moves against the position). Unfilled orders are tracked explicitly. Taker execution follows P6-01.
+
+4. Data beyond OHLCV (data layer extension). Candidate data sources: funding rates, open interest, spot-perp basis, liquidations, individual trades (aggTrades) and the order book. The historical availability of each source is verified before it is relied on. Historical order book depth is generally not available afterwards. Whether to start recording the order book continuously is an explicit owner decision; until it is taken, nothing is recorded. If recording is approved, it is an isolated component that uses only public market data, never API keys, and never interacts with trading.
+
+5. Position sizing and risk (Phase 8). Position size is part of the strategy and is evaluated with it. Required elements: volatility-targeted sizing; a hard cap at a fraction of the Kelly size, because the edge is always estimated with uncertainty; pre-registered drawdown-based risk reduction; and limits on exposure and leverage. All sizing rules are fixed before the out-of-sample evaluation and evaluated on unseen data.
+
+6. Benchmarks in every evaluation. Every strategy evaluation reports, for the same period and net of costs: buy-and-hold BTC (spot), cash, and risk-adjusted comparisons (for example return per unit of drawdown and volatility). A strategy is only a candidate if it beats these benchmarks according to pre-registered criteria.
+
+7. Several uncorrelated strategies (strategy phases and portfolio level). Candidates are also evaluated as a portfolio: return correlations, combined drawdown and capital allocation. The allocation rule is pre-registered. A few independent strategies with moderate edge are preferred over a single strategy with an apparently higher but more fragile edge.
+
+8. Taxes (Phase 10). Swedish tax rules can make each disposal of crypto a taxable event, which affects the profit that is actually kept, especially for high-turnover strategies. Evaluations report results both before and after a simplified, configurable tax estimate, plus turnover and the number of disposals. The tax estimate is an approximation for comparison only, not tax advice; the rules are verified against current Swedish rules or with an adviser before live use.
+
 2. VIKTIGASTE PRINCIPEN
 
 Var skeptisk.
