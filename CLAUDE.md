@@ -7,6 +7,7 @@ and ask the owner; never choose yourself.
 ## Project
 - BTC quant research platform. Research first: if nothing passes out-of-sample, walk-forward and
   risk criteria, deploy nothing (cash). Live trading is off by default (`LIVE_TRADING`).
+- Quality and correctness are the only decision criteria; every check, test, review and verification is done in full; complexity only where it has a clear function (G-15).
 
 ## Authoritative documents (read, never reconstruct from memory)
 - `docs/MASTER_SPEC.md`: scope (sections 0-72, incl. 1.1 PRIMARY OBJECTIVE).
