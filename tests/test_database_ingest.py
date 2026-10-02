@@ -549,6 +549,61 @@ def test_crash_after_log_before_ref_is_a_d1_pending(store, src, monkeypatch):
         [(1, "changed"), (2, "changed"), (3, "unchanged")]
 
 
+def _ingest_catalog_equals_records(store) -> None:
+    rows = catalog_rows(store, "SELECT seq, ingest_id, record_sha256, dataset_id, data_version, "
+                               "previous_data_version, params_json, code_version, worktree_clean, publication, "
+                               "ref_outcome, ref_log_seq, duplicates_dropped FROM ingest_events ORDER BY seq")
+    srcs = catalog_rows(store, "SELECT ingest_seq, source_index, name, sha256, rows FROM ingest_sources "
+                               "ORDER BY ingest_seq, source_index")
+    expected_rows, expected_srcs = [], []
+    for rec in store.ingest_history():
+        sha = hashlib.sha256((records_dir(store) / f"{rec.ingest_id}.json").read_bytes()).hexdigest()
+        expected_rows.append((rec.seq, rec.ingest_id, sha, rec.ref.dataset_id, rec.ref.data_version,
+                              rec.previous_data_version, json.dumps(rec.params, sort_keys=True, separators=(",", ":")),
+                              rec.code_version, int(rec.worktree_clean), rec.publication, rec.ref_outcome,
+                              rec.ref_log_seq, rec.duplicates_dropped))
+        expected_srcs += [(rec.seq, i, s.name, s.sha256, s.rows) for i, s in enumerate(rec.sources)]
+    assert rows == expected_rows and srcs == expected_srcs
+
+
+def test_completing_an_ingest_d1_pending_syncs_the_ingest_catalog_at_once(store, src, monkeypatch):
+    """Steg 4-fix: krasch i ingest() mellan logg och ref-fil, sedan complete_pending_ref_updates():
+    ingest_events/ingest_sources är kompletta direkt (ingen fördröjning till nästa ingest)."""
+    ingest(store, [csv(src, "a.csv", n=60)])
+    with monkeypatch.context() as m:
+        crash(m, vs.StoreWriter, "_write_ref_file")
+        with pytest.raises(RuntimeError):
+            ingest(store, [csv(src, "b.csv", n=90)])
+    assert catalog_rows(store, "SELECT seq FROM ingest_events ORDER BY seq") == [(1,)]
+    with store.writer() as w:
+        [done] = w.complete_pending_ref_updates()
+    assert done.ref_log_seq == 2 and len(store.ingest_history()) == 2
+    _ingest_catalog_equals_records(store)
+    conn = catalog.open_catalog(store.catalog_path, readonly=True)
+    assert catalog.check_catalog(conn, full=True) == []
+    conn.close()
+
+
+def test_completing_a_set_current_pending_does_not_sync_the_ingest_catalog(store, src, monkeypatch):
+    first = ingest(store, [csv(src, "a.csv", n=60)])
+    with store.writer() as w:
+        other = w.publish_version(KEY, canonicalize(make_klines("15m", 70, 4).drop(columns=["close_time"])
+                                                   .assign(gap_before=False))).info.data_version
+    with monkeypatch.context() as m:
+        crash(m, vs.StoreWriter, "_write_ref_file")
+        with store.writer() as w, pytest.raises(RuntimeError):
+            w.set_current(KEY, other)
+    calls = []
+    real = vs.StoreWriter._sync_ingest_catalog
+    monkeypatch.setattr(vs.StoreWriter, "_sync_ingest_catalog",
+                        lambda self, r: (calls.append(1), real(self, r))[1])
+    with store.writer() as w:
+        assert len(w.complete_pending_ref_updates()) == 1
+    assert calls == [] and store.current_ref(KEY).ref.data_version == other
+    assert store.ingest_history() == (first.record,)
+    _ingest_catalog_equals_records(store)
+
+
 def test_crash_before_ingest_catalog_is_synced_later(store, src, monkeypatch):
     f = csv(src, "a.csv")
     with monkeypatch.context() as m:

@@ -1152,6 +1152,8 @@ class StoreWriter:
         self._register(info, manifest)
         self._write_ref_file(e.ref, e)
         self._sync_ref_catalog(store._load_ref_state())
+        if e.action == "ingest":                         # steg 4-fix: ingest-postens katalograd utan fördröjning
+            self._sync_ingest_catalog(store._load_ingests())
         return [RefUpdate(e.ref, True, e.previous_data_version, e.seq)]
 
     @staticmethod
