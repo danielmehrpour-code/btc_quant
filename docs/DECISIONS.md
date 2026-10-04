@@ -231,9 +231,29 @@ Verbatim approval: `~/phase4_work/STEP6B_APPROVAL.md`. Design:
 | P4-S6b-o | 4.6b | Per-report failure codes (7): `SOURCE_UNREADABLE`, `REPORT_INVALID`, `MARKDOWN_MISMATCH`, `CONFIG_MISMATCH`, `TARGET_MISSING`, `BINDING_MISMATCH`, `NOT_REPRODUCIBLE`. | Exact, machine-checkable report. | owner decision 2026-10-04 (D-S6b-o); `btc_trading_system/database/quality_registry.py:75` |
 | P4-S6b-p | 4.6b | The Step 6b mutation set has 16 mutations (`~/phase4_work/mutation/step6b_mutate.py`): the 14 of the design, 15 Markdown check removed, 16 provenance check removed. | Each guarantee of this step has a mutation that a test kills. | owner decision 2026-10-04 (D-S6b-p) |
 
+## Phase 4 Step 7: range reads
+
+Design approved by the owner on 2026-10-04 (D-S7-a to D-S7-h as proposed). Verbatim approval:
+`~/phase4_work/STEP7_APPROVAL.md`. Design: `~/phase4_work/scratch/step7/DESIGN_step7.md`. Line
+references are to this commit.
+
+| ID | Phase/step | Decision | Rationale | Source |
+|---|---|---|---|---|
+| P4-S7-a | 4.7 | Range reads are additions to `versioned_store.py`: the pure `range_slice(frame, timeframe, start, end, as_of=None)`, `VersionedStore.read_range(key, data_version, start, end, *, as_of=None)` and `PinnedStore.read_range(key, start, end, *, as_of=None)`. Boundary semantics are exactly `LocalOHLCVProvider.get_bars`: `[start, end)` on `open_time` (`searchsorted` left/left), `start == end` empty, `end < start` → `ValueError`, `as_of` → `available_at <= as_of` via the existing `causal_cutoff` (`side="right"`), `max(lo, hi)`, `gap_before` as stored, `require_utc` for every timestamp. Not wired into `LocalOHLCVProvider` (spec line 264). | The spec lists range reads under `versioned_store.py`; one causal rule; identity with Phase 2 proven by exhaustive equivalence tests. | owner decision 2026-10-04 (D-S7-a); `btc_trading_system/database/versioned_store.py:435`, `:712`, `:1582` |
+| P4-S7-b | 4.7 | No range read for `read_current`. | P4-S3-D4: `read_current` is "latest known data cut at t", not point-in-time, and must never feed a backtest; range reads are the backtest/research access pattern. Live/paper phases can add one with their own decision. | owner decision 2026-10-04 (D-S7-b) |
+| P4-S7-c | 4.7 | Output format is `read_version`'s: `RangeIndex`, canonical columns with `open_time` as a column, no `available_at`, plus the manifest. Provider equivalence is checked on `set_index("open_time")` plus `available_at`. | Consistent with the rest of the versioned-store API. | owner decision 2026-10-04 (D-S7-c) |
+| P4-S7-d | 4.7 | Every `read_range` call fully verifies the whole object (`_verify_object`) before slicing; no cache, no partial or row-group reads, no filter pushdown. Measured on synthetic 1m data (2026-10-04): 15.6 ms per month (44,640 bars), 122 ms per year. | Every returned row comes from bytes verified in that call; partial reads would return unverified bytes; the measured cost does not justify a cache. | owner decision 2026-10-04 (D-S7-d) |
+| P4-S7-e | 4.7 | All inputs are validated before any file is opened: non-`datetime` → `TypeError`; naive or non-zero UTC offset → `ValueError` (`require_utc`); `end < start` → `ValueError`. Differences from the provider are limited to error precedence when several inputs are wrong (the provider checks `as_of` after loading) and `TypeError` instead of `AttributeError` for non-datetime input; boundary semantics are unaffected. | Fail fast, no I/O on invalid input. | owner decision 2026-10-04 (D-S7-e); `btc_trading_system/database/versioned_store.py:422` |
+| P4-S7-f | 4.7 | `as_of` is optional on both `read_range`s (None = no causal filter), as the provider default, `read_version` and `PinnedStore.read`; no `require_as_of` flag in the storage layer. | Same contract as the existing reads. | owner decision 2026-10-04 (D-S7-f) |
+| P4-S7-g | 4.7 | The Step 7 mutation set has 12 mutations (`~/phase4_work/mutation/step7_mutate.py`): start and end off-by-one, the `as_of` boundary, an `as_of` future leak, naive input accepted, non-zero offset converted, verification bypass, pinned read following the ref, pinned fallback outside the snapshot, `end < start` check removed, `as_of` ignored, `gap_before` recomputed. `iloc[lo:hi]` is excluded as an equivalent mutant (an inverted slice is already empty). | Each boundary and guarantee has a mutation that a test kills. | owner decision 2026-10-04 (D-S7-g) |
+| P4-S7-h | 4.7 | Structural edit under G-13 in this commit: the UNCERTAIN introduction now reads "Two open: U-08 and U-09 (below). U-01 to U-07 were resolved by the owner on 2026-09-30:"; the separate line "Also open since 2026-10-04: U-09 (below)." is removed. No decision text changes. | One accurate sentence naming both open items. | owner decision 2026-10-04 (D-S7-h) |
+| P4-S7-API | 4.7 | Step 7 changes to `versioned_store.py` are additions only; in `tests/test_database_versioned_store.py` exactly one line changes: the API-pin set of public `VersionedStore` names gains `read_range` (+1/−1). | Same kind of change as the Step 3 and Step 4 API pins (P4-S3-D2, P4-S4-API); `read_range` is read-only, so the pin's purpose (no mutating operations) holds. | owner decision 2026-10-04; `tests/test_database_versioned_store.py:575` |
+| P4-S7-TF | 4.7 | `range_slice` validates its `timeframe` argument with Phase 2's `timeframe_ms` (unknown timeframe → `ValueError`, before any slicing). | `range_slice` takes a plain string; without the check an unknown timeframe would give `KeyError`, and only when `as_of` is given. Same function as `DatasetKey`. | owner decision 2026-10-04; `btc_trading_system/database/versioned_store.py:439` |
+| P4-S7-IMP | 4.7 | `timeframe_ms` is reached through a separate added import line `from btc_trading_system.data import schema as p2_schema`. | Adding the name to the existing `schema` import would modify that committed line (ruff I001 merges them); a separate line keeps `versioned_store.py` additions only. | owner decision 2026-10-04; `btc_trading_system/database/versioned_store.py:173` |
+
 ## UNCERTAIN (for the owner to decide; not decisions)
 
-One open: U-08 (below). U-01 to U-07 were resolved by the owner on 2026-09-30:
+Two open: U-08 and U-09 (below). U-01 to U-07 were resolved by the owner on 2026-09-30:
 
 | ID | Resolution |
 |---|---|
@@ -244,8 +264,6 @@ One open: U-08 (below). U-01 to U-07 were resolved by the owner on 2026-09-30:
 | U-05 | Not locked; placeholders until their own commit: P1-04. |
 | U-06 | General rule: G-08. |
 | U-07 | Yes: this log is the accepted record for G-06, G-07 and P4-S2-04 (see the introduction). |
-
-Also open since 2026-10-04: U-09 (below).
 
 Open:
 

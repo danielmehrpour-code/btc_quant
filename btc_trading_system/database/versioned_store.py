@@ -132,6 +132,20 @@ INGEST MED LINEAGE (steg 4)
   previous_data_version == ref-filens version (eller båda saknas) och objektet klarar
   full verifiering igen; annars fel och ingen ändring. Kontrollen sker via en inlagd rad
   i _load_ref_state och är en no-op när det inte finns några ingest-poster.
+
+INTERVALLÄSNING (steg 7)
+  read_range(key, data_version, start, end, as_of=None) och PinnedStore.read_range(key, start,
+  end, as_of=None) har EXAKT LocalOHLCVProvider.get_bars-semantik (Phase 2):
+    * [start, end) på open_time: bar exakt vid start ingår, bar exakt vid end ingår inte;
+      start == end -> tomt; end < start -> ValueError
+    * as_of -> endast barer med available_at = open_time + tf <= as_of (causal_cutoff);
+      as_of=None -> ingen kausalitetsfiltrering
+    * start/end/as_of måste vara datetime (annars TypeError), tz-aware med UTC-offset 0
+      (require_utc; naiv eller annan offset -> ValueError); kontrolleras innan någon fil öppnas
+    * gap_before som lagrad (räknas aldrig om på utsnittet); inga luckor fylls
+  Varje anrop verifierar hela objektet (read_version/_verify_object) innan utsnittet tas: ingen
+  cache, inga delläsningar. read_current har ingen intervallvariant (P4-S3-D4). Intervall-
+  läsningarna kopplas inte in i LocalOHLCVProvider.
 """
 from __future__ import annotations
 
@@ -156,6 +170,7 @@ from typing import Any, Literal
 import pandas as pd
 
 from btc_trading_system.core.types import TIMEFRAMES, require_utc
+from btc_trading_system.data import schema as p2_schema
 from btc_trading_system.data.ingest import ingest_dataset
 from btc_trading_system.data.schema import DatasetKey
 from btc_trading_system.data.storage import (
@@ -401,6 +416,34 @@ def causal_cutoff(as_of: datetime, timeframe: str) -> pd.Timestamp:
 def apply_as_of(frame: pd.DataFrame, timeframe: str, as_of: datetime) -> pd.DataFrame:
     mask = frame["open_time"] <= causal_cutoff(as_of, timeframe)
     return frame.loc[mask].reset_index(drop=True)
+
+
+# ------------------------------------------------------------------ intervalläsning (steg 7)
+def _check_range(start: datetime, end: datetime, as_of: datetime | None) -> tuple[datetime, datetime]:
+    """Indata innan någon fil öppnas: datetime, tz-aware UTC (require_utc), end >= start."""
+    named = [("start", start), ("end", end)] + ([("as_of", as_of)] if as_of is not None else [])
+    for name, ts in named:
+        if not isinstance(ts, datetime):
+            raise TypeError(f"{name} måste vara datetime, fick {type(ts).__name__}")
+        require_utc(ts, name)
+    lo, hi = require_utc(start, "start"), require_utc(end, "end")
+    if hi < lo:
+        raise ValueError("end < start")
+    return lo, hi
+
+
+def range_slice(frame: pd.DataFrame, timeframe: str, start: datetime, end: datetime,
+                as_of: datetime | None = None) -> pd.DataFrame:
+    """[start, end) på open_time; as_of -> available_at <= as_of. Exakt samma indexaritmetik
+    som LocalOHLCVProvider.get_bars, på en verifierad frame i lagrets format."""
+    p2_schema.timeframe_ms(timeframe)                        # okänd timeframe -> ValueError
+    lo_ts, hi_ts = _check_range(start, end, as_of)
+    times = frame["open_time"]
+    lo = int(times.searchsorted(pd.Timestamp(lo_ts), side="left"))
+    hi = int(times.searchsorted(pd.Timestamp(hi_ts), side="left"))
+    if as_of is not None:
+        hi = min(hi, int(times.searchsorted(causal_cutoff(as_of, timeframe), side="right")))
+    return frame.iloc[lo:max(lo, hi)].reset_index(drop=True)
 
 
 # ------------------------------------------------------------------ refs / ref_log (steg 3)
@@ -665,6 +708,14 @@ class VersionedStore:
         if as_of is not None:
             frame = apply_as_of(frame, key.timeframe, as_of)
         return frame, manifest
+
+    def read_range(self, key: DatasetKey, data_version: str, start: datetime, end: datetime, *,
+                   as_of: datetime | None = None) -> tuple[pd.DataFrame, dict[str, Any]]:
+        """Exakt denna version, [start, end) med Phase 2-semantik (se INTERVALLÄSNING).
+        Indata kontrolleras först; hela objektet verifieras vid varje anrop."""
+        _check_range(start, end, as_of)
+        _, manifest, frame = self._verify_object(key, data_version)
+        return range_slice(frame, key.timeframe, start, end, as_of), manifest
 
     def _verify_object(self, key: DatasetKey, dv: str
                        ) -> tuple[VersionInfo, dict[str, Any], pd.DataFrame]:
@@ -1527,6 +1578,12 @@ class PinnedStore:
         """Den pinnade versionen (full verifiering); as_of -> available_at <= as_of."""
         pin = self.version_of(key)
         return self._store.read_version(pin.key, pin.data_version, as_of=as_of)
+
+    def read_range(self, key: DatasetKey, start: datetime, end: datetime, *,
+                   as_of: datetime | None = None) -> tuple[pd.DataFrame, dict[str, Any]]:
+        """Den pinnade versionen, [start, end) med Phase 2-semantik (full verifiering)."""
+        pin = self.version_of(key)
+        return self._store.read_range(pin.key, pin.data_version, start, end, as_of=as_of)
 
     def _read_only(self, *args: Any, **kwargs: Any) -> None:
         raise ReadOnlyStoreError(f"PinnedStore {self.snapshot_id} är read-only")
