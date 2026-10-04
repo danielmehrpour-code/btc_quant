@@ -32,6 +32,11 @@ REPAIR (repair_store) är dry-run som standard (apply=False). Ordning under skri
 Repair skriver aldrig utanför tmp/ förutom catalog.sqlite (och dess journal via SQLite),
 rör aldrig objects/, refs/, ref_log.jsonl, snapshots/, ingests/ eller STORE.json och slutför
 aldrig väntande ref-uppdateringar eller ingests.
+
+IMPORTER (steg 6): imports/<import_id>.json verifieras strikt (legacy.py); varje importpost
+måste peka på ett befintligt objekt och stämma med dess manifest (bas- och innehållsnycklar),
+och varje ref_log-post med action=import_legacy måste ha en importpost. Importposter har ingen
+katalogtabell. Repair rör aldrig imports/.
 """
 from __future__ import annotations
 
@@ -51,6 +56,7 @@ from typing import Any
 from btc_trading_system.data.schema import DatasetKey
 from btc_trading_system.data_validation.errors import DataError
 from btc_trading_system.database import catalog
+from btc_trading_system.database import legacy as lg
 from btc_trading_system.database import versioned_store as vs
 from btc_trading_system.database.lineage import IngestRecord
 from btc_trading_system.database.refs import compact_json_bytes
@@ -83,6 +89,9 @@ CODES: dict[str, str] = {
     "INGEST_LOG_MISMATCH": "ERROR",
     "INGEST_TARGET_MISSING": "ERROR",
     "PENDING_INGEST": "PENDING",
+    "IMPORT_CORRUPT": "ERROR",
+    "IMPORT_TARGET_MISSING": "ERROR",
+    "IMPORT_LOG_MISMATCH": "ERROR",
     "CATALOG_MISSING": "REPAIRABLE",
     "CATALOG_UNREADABLE": "REPAIRABLE",
     "CATALOG_NEWER_SCHEMA": "ERROR",
@@ -119,12 +128,13 @@ SCOPE_CHECKS: tuple[str, ...] = (
     "ref_log.parse", "refs.files", "refs.consistency", "refs.targets",
     "snapshots.files", "snapshots.members",
     "ingests.chain", "ingests.ref_log", "ingests.targets",
+    "imports.records", "imports.targets", "imports.ref_log",
     "catalog.open", "catalog.structure_full",
     *(f"catalog.rows.{t}" for t, _, _ in CATALOG_TABLES),
     "tmp.entries",
 )
 
-_ROOT_DIRS = frozenset({"objects", "refs", "snapshots", "ingests", "tmp"})
+_ROOT_DIRS = frozenset({"objects", "refs", "snapshots", "ingests", "imports", "tmp"})
 _ROOT_FILES = frozenset({vs.STORE_FILE, vs.LOCK_FILE, vs.REF_LOG_FILE, vs.CATALOG_FILE,
                          vs.CATALOG_FILE + "-journal"})
 _H = r"[0-9a-f]{32}"
@@ -132,6 +142,7 @@ _TMP_DIR_RE = re.compile(rf"{_H}")
 _TF = "|".join(re.escape(tf) for tf in catalog.SCHEMA_TIMEFRAMES)
 _TMP_FILE_RE = re.compile(
     rf"{_H}\.ingest\.json|{_H}\.snapshot\.json|{_H}\.ref_log\.jsonl|{_H}\.(?:{_TF})\.json"
+    rf"|{_H}\.import\.json"
     rf"|\.store-{_H}\.json|\.catalog-{_H}\.sqlite\.tmp(?:-journal|-wal|-shm)?")
 
 
@@ -255,6 +266,7 @@ class _Verifier:
         self.counts: dict[str, int] = {}
         self.derived = _Derived({t: set() for t, _, _ in CATALOG_TABLES}, set(), {})
         self.valid_objects: dict[tuple[str, str], DatasetKey] = {}
+        self.object_manifests: dict[tuple[str, str], dict[str, Any]] = {}
         self.object_dirs: set[tuple[str, str]] = set()         # alla med giltig layout
         self.referenced: set[tuple[str, str]] = set()
         self.entries: tuple[vs._LogEntry, ...] | None = None
@@ -293,6 +305,7 @@ class _Verifier:
         self.check_refs()
         self.check_snapshots()
         self.check_ingests()
+        self.check_imports()
         self.check_references()
         self.check_catalog()
         self.check_tmp()
@@ -372,6 +385,7 @@ class _Verifier:
                 self.derived.excluded_versions.add((did, dv))
                 continue
             self.valid_objects[(did, dv)] = key
+            self.object_manifests[(did, dv)] = manifest
             self.derived.rows["dataset_versions"].add(_version_row(info, manifest))
             for i, r in enumerate(vs._parse_sources(manifest.get("sources"))):
                 self.derived.rows["version_sources"].add((did, dv, i, r["name"], r["sha256"], r["rows"]))
@@ -573,6 +587,45 @@ class _Verifier:
                  rec.publication, rec.ref_outcome, rec.ref_log_seq, rec.duplicates_dropped))
             for i, s in enumerate(rec.sources):
                 self.derived.rows["ingest_sources"].add((rec.seq, i, s.name, s.sha256, s.rows))
+
+    # ---- importer (steg 6)
+    def check_imports(self) -> None:
+        records: list[lg.ImportRecord] = []
+        d = self._real_dir(lg.IMPORTS_DIR)
+        if d is not None:
+            for p in sorted(d.iterdir()):
+                subject = self.rel(p)
+                if stat.S_ISLNK(os.lstat(p).st_mode):
+                    self.add("SYMLINK", subject, "symlänk under imports/")
+                    continue
+                try:
+                    records.append(lg._read_import_file(p)[0])
+                except (lg.ImportCorruptError, OSError) as e:
+                    self.add("IMPORT_CORRUPT", subject, str(e))
+        self.done("imports.records")
+        recorded: set[tuple[str, str]] = set()
+        for rec in records:
+            did, dv = rec.ref.dataset_id, rec.ref.data_version
+            subject = f"{lg.IMPORTS_DIR}/{rec.import_id}.json"
+            recorded.add((did, dv))
+            self.referenced.add((did, dv))
+            if not self._object_exists(did, dv):
+                self.add("IMPORT_TARGET_MISSING", subject, f"{rec.ref.key.relpath}/{dv} saknas")
+            elif (did, dv) in self.object_manifests:
+                conflicts = lg.manifest_conflicts(rec.manifest, self.object_manifests[(did, dv)])
+                if conflicts:
+                    self.add("IMPORT_CORRUPT", subject, f"stämmer inte med objektets manifest: {conflicts}")
+        self.done("imports.targets")
+        if self.entries is None:
+            self.skip("imports.ref_log", "ref_log är ogiltig")
+        else:
+            for entry in self.entries:
+                if entry.action == "import_legacy" \
+                        and (entry.ref.dataset_id, entry.ref.data_version) not in recorded:
+                    self.add("IMPORT_LOG_MISMATCH", f"{vs.REF_LOG_FILE}#{entry.seq}",
+                             f"{entry.ref.key.relpath}/{entry.ref.data_version}: import_legacy utan importpost")
+            self.done("imports.ref_log")
+        self.counts["imports"] = len(records)
 
     # ---- referenser (INFO)
     def check_references(self) -> None:

@@ -13,9 +13,12 @@ from pathlib import Path
 import pytest
 from data_helpers import NOW, canon_frame, make_klines, write_csv
 
+from btc_trading_system.data.ingest import ingest_dataset
 from btc_trading_system.data.schema import DatasetKey
+from btc_trading_system.data.storage import DatasetStore, ParquetBackend
 from btc_trading_system.database import catalog
 from btc_trading_system.database import integrity as ig
+from btc_trading_system.database import legacy as lg
 from btc_trading_system.database import versioned_store as vs
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -73,6 +76,21 @@ def history(store, src) -> dict:
         snap = w.snapshot_current([SPOT, PERP]).snapshot
     loose = publish(store, seed=9)
     return {"a": a, "b": b, "p": p, "snap": snap, "loose": loose}
+
+
+def legacy_source(root: Path, specs) -> Path:
+    """Hermetiskt Phase 2-lager byggt med Phase 2:s egen ingest (ParquetBackend), steg 6."""
+    p2 = DatasetStore(root, ParquetBackend())
+    for instrument, tf, n, seed in specs:
+        f = write_csv(root.parent / f"{root.name}-{instrument}-{tf}-{seed}.csv", make_klines(tf, n, seed))
+        ingest_dataset([f], instrument, tf, p2, now=NOW)
+    return root
+
+
+def legacy_import(store, root: Path, specs) -> lg.LegacyImportReport:
+    report = lg.import_legacy(store, legacy_source(root, specs), apply=True)
+    assert report.ok, report.to_json_obj()
+    return report
 
 
 def tree_hash(root: Path, *, mtime: bool = False) -> str:
@@ -192,6 +210,7 @@ def test_codes_table_is_the_approved_scale():
         "REF_TARGET_MISSING": "ERROR", "PENDING_REF_UPDATE": "PENDING",
         "SNAPSHOT_CORRUPT": "ERROR", "SNAPSHOT_MEMBER_MISSING": "ERROR",
         "INGEST_CORRUPT": "ERROR", "INGEST_LOG_MISMATCH": "ERROR", "INGEST_TARGET_MISSING": "ERROR",
+        "IMPORT_CORRUPT": "ERROR", "IMPORT_TARGET_MISSING": "ERROR", "IMPORT_LOG_MISMATCH": "ERROR",
         "PENDING_INGEST": "PENDING", "CATALOG_MISSING": "REPAIRABLE", "CATALOG_UNREADABLE": "REPAIRABLE",
         "CATALOG_NEWER_SCHEMA": "ERROR", "CATALOG_STRUCTURE": "REPAIRABLE", "CATALOG_BEHIND": "REPAIRABLE",
         "CATALOG_CONFLICT": "ERROR", "TMP_LEFTOVER": "REPAIRABLE", "TMP_UNKNOWN": "WARN"}
@@ -221,6 +240,7 @@ def test_clean_store_after_full_history(store, src):
     assert [s.check for s in r.scope] == list(ig.SCOPE_CHECKS)
     assert all(s.status == "performed" for s in r.scope)
     assert dict(r.counts) == {"datasets": 2, "ingests": 3, "objects_corrupt": 0, "objects_valid": 4,
+                              "imports": 0,
                               "ref_log_entries": 3, "refs": 2, "snapshots": 1, "tmp_entries": 0}
     assert r.catalog_dump_sha256 == hashlib.sha256(dump(store).encode("ascii")).hexdigest()
 
@@ -512,6 +532,24 @@ def _tmp_leftover(st, ctx):
     (st.tmp / f"{H}.snapshot.json").write_text("x")
 
 
+def _import_writable(st, ctx):
+    rep = legacy_import(st, ctx["src"].parent / "p2w", [("spot", "1m", 40, 5)])
+    os.chmod(st.root / "imports" / f"{rep.datasets[0].import_id}.json", 0o644)
+
+
+def _import_target_missing(st, ctx):
+    rep = legacy_import(st, ctx["src"].parent / "p2t", [("spot", "15m", 70, 6)])    # SPOT har ref: kept
+    assert rep.datasets[0].ref_outcome == lg.REF_KEPT
+    remove_object(st, SPOT, rep.datasets[0].data_version)
+
+
+def _import_record_deleted(st, ctx):
+    rep = legacy_import(st, ctx["src"].parent / "p2d", [("perp", "1m", 40, 7)])
+    p = st.root / "imports" / f"{rep.datasets[0].import_id}.json"
+    os.chmod(p, 0o644)
+    p.unlink()
+
+
 DAMAGE = {
     "ROOT_LAYOUT": _tmp_missing, "STORE_FILE_INVALID": _store_file_symlink, "ROOT_FOREIGN_ENTRY": _root_foreign,
     "QUALITY_UNSUPPORTED/dir": _quality_dir, "QUALITY_UNSUPPORTED/row": _quality_row,
@@ -532,6 +570,8 @@ DAMAGE = {
     "CATALOG_CONFLICT/extra_row": _catalog_extra_row, "CATALOG_CONFLICT/snapshot_deleted": _snapshot_deleted,
     "CATALOG_CONFLICT/object_deleted": _unreferenced_object_deleted,
     "TMP_UNKNOWN": _tmp_unknown, "TMP_LEFTOVER": _tmp_leftover,
+    "IMPORT_CORRUPT": _import_writable, "IMPORT_TARGET_MISSING": _import_target_missing,
+    "IMPORT_LOG_MISMATCH": _import_record_deleted,
 }
 
 
@@ -573,6 +613,13 @@ TMP_CRASHES = {
     "ingest": (("vs._link = die\nwith st.writer() as w:\n"
                 "    w.ingest(K, [SRC], now=NOW, code_version='t', worktree_clean=True)\n"),
                rf"{'[0-9a-f]' * 32}\.ingest\.json"),
+    "import": (("from btc_trading_system.data.ingest import ingest_dataset\n"
+                "from btc_trading_system.data.storage import DatasetStore, ParquetBackend\n"
+                "from btc_trading_system.database import legacy\n"
+                "P2 = os.path.join(os.path.dirname(SRC), 'p2')\n"
+                "ingest_dataset([SRC], 'perp', '15m', DatasetStore(P2, ParquetBackend()), now=NOW)\n"
+                "vs._link = die\nlegacy.import_legacy(st, P2, apply=True)\n"),
+               rf"{'[0-9a-f]' * 32}\.import\.json"),
 }
 
 
@@ -870,6 +917,9 @@ def test_derived_rows_equal_the_writer_catalog_in_every_state(store, src):
     assert back.record.ref_outcome == "changed" and back.record.allow_regression
     assert_derived_matches(store)
     set_current(store, SPOT, v1)                                            # ref bakåt via set_current
+    assert_derived_matches(store)
+    imp = legacy_import(store, src.parent / "p2", [("spot", "1m", 50, 4), ("perp", "15m", 45, 8)])
+    assert [d.ref_outcome for d in imp.datasets] == [lg.REF_SET, lg.REF_KEPT]   # legacy-import (steg 6)
     assert_derived_matches(store)
     ctx = {"loose": long.record.ref.data_version, "src": src}
     _pending_ref(store, ctx)                                                # väntande D1
