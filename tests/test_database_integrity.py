@@ -16,9 +16,12 @@ from data_helpers import NOW, canon_frame, make_klines, write_csv
 from btc_trading_system.data.ingest import ingest_dataset
 from btc_trading_system.data.schema import DatasetKey
 from btc_trading_system.data.storage import DatasetStore, ParquetBackend
+from btc_trading_system.data_validation import quality_config as qc
+from btc_trading_system.data_validation import quality_report as qr
 from btc_trading_system.database import catalog
 from btc_trading_system.database import integrity as ig
 from btc_trading_system.database import legacy as lg
+from btc_trading_system.database import quality_registry as qreg
 from btc_trading_system.database import versioned_store as vs
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -89,6 +92,25 @@ def legacy_source(root: Path, specs) -> Path:
 
 def legacy_import(store, root: Path, specs) -> lg.LegacyImportReport:
     report = lg.import_legacy(store, legacy_source(root, specs), apply=True)
+    assert report.ok, report.to_json_obj()
+    return report
+
+
+def dataset_reports(root: Path, datasets) -> Path:
+    """Phase 3:s datasetrapporter (byggare + write_report) för ett Phase 2-lager, steg 6b."""
+    p2, cfg, out = DatasetStore(root, ParquetBackend()), qc.load_quality_config(), root.parent / f"{root.name}-q"
+    for instrument, tf in datasets:
+        key = DatasetKey(instrument, "BTCUSDT", tf)
+        frame, manifest = p2.read(key)
+        qr.write_report(qr.build_dataset_report(frame, key, manifest, cfg, "test", True), out)
+    return out
+
+
+def quality_register(store, root: Path, specs) -> qreg.QualityRegistrationReport:
+    """Legacy-import och registrering av datasetrapporterna för samma dataset (steg 6b)."""
+    legacy_import(store, root, specs)
+    report = qreg.register_quality_reports(store, dataset_reports(root, [(i, tf) for i, tf, _, _ in specs]),
+                                           apply=True)
     assert report.ok, report.to_json_obj()
     return report
 
@@ -203,7 +225,7 @@ def non_info(report) -> set[tuple[str, str]]:
 def test_codes_table_is_the_approved_scale():
     assert ig.CODES == {
         "ROOT_LAYOUT": "ERROR", "STORE_FILE_INVALID": "ERROR", "ROOT_FOREIGN_ENTRY": "WARN",
-        "QUALITY_UNSUPPORTED": "ERROR", "LOCK_MISSING": "WARN", "SYMLINK": "ERROR",
+        "LOCK_MISSING": "WARN", "SYMLINK": "ERROR",
         "OBJECT_LAYOUT": "ERROR", "OBJECT_CORRUPT": "ERROR", "OBJECT_DIR_MODE": "WARN",
         "OBJECT_UNREGISTERED": "REPAIRABLE", "OBJECT_UNREFERENCED": "INFO",
         "REF_LOG_CORRUPT": "ERROR", "REF_FILE_CORRUPT": "ERROR", "REF_FOREIGN_ENTRY": "ERROR",
@@ -211,6 +233,7 @@ def test_codes_table_is_the_approved_scale():
         "SNAPSHOT_CORRUPT": "ERROR", "SNAPSHOT_MEMBER_MISSING": "ERROR",
         "INGEST_CORRUPT": "ERROR", "INGEST_LOG_MISMATCH": "ERROR", "INGEST_TARGET_MISSING": "ERROR",
         "IMPORT_CORRUPT": "ERROR", "IMPORT_TARGET_MISSING": "ERROR", "IMPORT_LOG_MISMATCH": "ERROR",
+        "QUALITY_CORRUPT": "ERROR", "QUALITY_TARGET_MISSING": "ERROR", "QUALITY_BINDING_MISMATCH": "ERROR",
         "PENDING_INGEST": "PENDING", "CATALOG_MISSING": "REPAIRABLE", "CATALOG_UNREADABLE": "REPAIRABLE",
         "CATALOG_NEWER_SCHEMA": "ERROR", "CATALOG_STRUCTURE": "REPAIRABLE", "CATALOG_BEHIND": "REPAIRABLE",
         "CATALOG_CONFLICT": "ERROR", "TMP_LEFTOVER": "REPAIRABLE", "TMP_UNKNOWN": "WARN"}
@@ -241,6 +264,7 @@ def test_clean_store_after_full_history(store, src):
     assert all(s.status == "performed" for s in r.scope)
     assert dict(r.counts) == {"datasets": 2, "ingests": 3, "objects_corrupt": 0, "objects_valid": 4,
                               "imports": 0,
+                              "quality_reports": 0,
                               "ref_log_entries": 3, "refs": 2, "snapshots": 1, "tmp_entries": 0}
     assert r.catalog_dump_sha256 == hashlib.sha256(dump(store).encode("ascii")).hexdigest()
 
@@ -550,9 +574,39 @@ def _import_record_deleted(st, ctx):
     p.unlink()
 
 
+def _quality_file(st, rep) -> Path:
+    return st.root / "quality" / f"{rep.reports[0].report_sha256}.quality.json"
+
+
+def _quality_writable(st, ctx):
+    rep = quality_register(st, ctx["src"].parent / "q2w", [("perp", "1m", 40, 5)])
+    os.chmod(_quality_file(st, rep), 0o644)
+
+
+def _quality_foreign(st, ctx):
+    quality_register(st, ctx["src"].parent / "q2f", [("perp", "1m", 40, 5)])
+    (st.root / "quality" / "notes.txt").write_text("x")
+
+
+def _quality_target_missing(st, ctx):
+    rep = quality_register(st, ctx["src"].parent / "q2t", [("spot", "15m", 70, 6)])     # SPOT har ref: kept
+    remove_object(st, SPOT, rep.reports[0].datasets[0][1])
+
+
+def _quality_binding(st, ctx):
+    """En giltig, låst, sha-namngiven rapportfil vars rows inte stämmer med objektet."""
+    rep = quality_register(st, ctx["src"].parent / "q2b", [("perp", "1m", 40, 7)])
+    obj = json.loads(_quality_file(st, rep).read_bytes())
+    obj["datasets"][0]["rows"] += 1
+    data = qr.report_to_json(obj)
+    p = st.root / "quality" / f"{hashlib.sha256(data).hexdigest()}.quality.json"
+    p.write_bytes(data)
+    os.chmod(p, 0o444)
+
+
 DAMAGE = {
     "ROOT_LAYOUT": _tmp_missing, "STORE_FILE_INVALID": _store_file_symlink, "ROOT_FOREIGN_ENTRY": _root_foreign,
-    "QUALITY_UNSUPPORTED/dir": _quality_dir, "QUALITY_UNSUPPORTED/row": _quality_row,
+    "CATALOG_CONFLICT/quality_row": _quality_row,
     "LOCK_MISSING": _lock_missing, "SYMLINK": _symlink_in_objects,
     "OBJECT_LAYOUT/file": _foreign_object_file, "OBJECT_LAYOUT/name": _bad_object_dir_name,
     "OBJECT_DIR_MODE": _object_dir_writable, "OBJECT_UNREGISTERED": _unregistered_object,
@@ -572,6 +626,8 @@ DAMAGE = {
     "TMP_UNKNOWN": _tmp_unknown, "TMP_LEFTOVER": _tmp_leftover,
     "IMPORT_CORRUPT": _import_writable, "IMPORT_TARGET_MISSING": _import_target_missing,
     "IMPORT_LOG_MISMATCH": _import_record_deleted,
+    "QUALITY_CORRUPT/writable": _quality_writable, "QUALITY_CORRUPT/foreign": _quality_foreign,
+    "QUALITY_TARGET_MISSING": _quality_target_missing, "QUALITY_BINDING_MISMATCH": _quality_binding,
 }
 
 
@@ -597,6 +653,27 @@ def test_catalog_structure_problem_is_repairable(store, src, monkeypatch):
     assert ig.plan_repair(r).rebuild_catalog
 
 
+def test_empty_quality_dir_is_valid(store, src):
+    ctx = {**history(store, src), "src": src}
+    _quality_dir(store, ctx)
+    r = ig.verify_store(store.root)
+    assert r.exit_status == 0 and dict(r.counts)["quality_reports"] == 0, r.findings
+
+
+def test_repair_rebuilds_quality_rows_and_never_touches_quality(store, src):
+    history(store, src)
+    rep = quality_register(store, src.parent / "q2r", [("perp", "1m", 40, 5), ("spot", "1m", 40, 6)])
+    assert len(rep.reports) == 2
+    final, files = dump(store), tree_hash(store.root / "quality", mtime=True)
+    os.unlink(store.catalog_path)
+    r = ig.verify_store(store.root)
+    assert "CATALOG_MISSING" in r.codes and dict(r.counts)["quality_reports"] == 2
+    ig.repair_store(store.root, apply=True)
+    assert dump(store) == final
+    assert tree_hash(store.root / "quality", mtime=True) == files
+    assert ig.verify_store(store.root).exit_status == 0
+
+
 # ================================================================== tmp/: verkliga kraschrester
 TMP_CRASHES = {
     "staging_dir": (("vs.StoreWriter._publish_dir = die\n"
@@ -620,6 +697,19 @@ TMP_CRASHES = {
                 "ingest_dataset([SRC], 'perp', '15m', DatasetStore(P2, ParquetBackend()), now=NOW)\n"
                 "vs._link = die\nlegacy.import_legacy(st, P2, apply=True)\n"),
                rf"{'[0-9a-f]' * 32}\.import\.json"),
+    "quality": (("from btc_trading_system.data.ingest import ingest_dataset\n"
+                 "from btc_trading_system.data.storage import DatasetStore, ParquetBackend\n"
+                 "from btc_trading_system.data_validation import quality_config as qc, quality_report as qr\n"
+                 "from btc_trading_system.database import legacy, quality_registry as qreg\n"
+                 "P2 = os.path.join(os.path.dirname(SRC), 'p2q')\n"
+                 "OUT = os.path.join(os.path.dirname(SRC), 'reports')\n"
+                 "ingest_dataset([SRC], 'perp', '15m', DatasetStore(P2, ParquetBackend()), now=NOW)\n"
+                 "legacy.import_legacy(st, P2, apply=True)\n"
+                 "P = DatasetKey('perp', 'BTCUSDT', '15m')\n"
+                 "f, m = DatasetStore(P2, ParquetBackend()).read(P)\n"
+                 "qr.write_report(qr.build_dataset_report(f, P, m, qc.load_quality_config(), 't', True), OUT)\n"
+                 "vs._link = die\nqreg.register_quality_reports(st, OUT, apply=True)\n"),
+                rf"{'[0-9a-f]' * 32}\.quality\.json"),
 }
 
 
@@ -920,6 +1010,10 @@ def test_derived_rows_equal_the_writer_catalog_in_every_state(store, src):
     assert_derived_matches(store)
     imp = legacy_import(store, src.parent / "p2", [("spot", "1m", 50, 4), ("perp", "15m", 45, 8)])
     assert [d.ref_outcome for d in imp.datasets] == [lg.REF_SET, lg.REF_KEPT]   # legacy-import (steg 6)
+    assert_derived_matches(store)
+    reg = qreg.register_quality_reports(store, dataset_reports(src.parent / "p2", [("spot", "1m"), ("perp", "15m")]),
+                                        apply=True)
+    assert reg.ok and len(reg.reports) == 2                                 # kvalitetsrapporter (steg 6b)
     assert_derived_matches(store)
     ctx = {"loose": long.record.ref.data_version, "src": src}
     _pending_ref(store, ctx)                                                # väntande D1

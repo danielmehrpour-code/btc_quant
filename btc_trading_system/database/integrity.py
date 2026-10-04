@@ -32,11 +32,19 @@ REPAIR (repair_store) är dry-run som standard (apply=False). Ordning under skri
 Repair skriver aldrig utanför tmp/ förutom catalog.sqlite (och dess journal via SQLite),
 rör aldrig objects/, refs/, ref_log.jsonl, snapshots/, ingests/ eller STORE.json och slutför
 aldrig väntande ref-uppdateringar eller ingests.
+Repair rör heller aldrig quality/ (steg 6b).
 
 IMPORTER (steg 6): imports/<import_id>.json verifieras strikt (legacy.py); varje importpost
 måste peka på ett befintligt objekt och stämma med dess manifest (bas- och innehållsnycklar),
 och varje ref_log-post med action=import_legacy måste ha en importpost. Importposter har ingen
 katalogtabell. Repair rör aldrig imports/.
+
+KVALITETSRAPPORTER (steg 6b): quality/<report_sha256>.quality.json verifieras strikt
+(quality_registry.py: namn == sha256 av bytena, 0444, strikt tolkning, Phase 3:s load_report,
+låst config); varje datasetpost måste peka på ett befintligt objekt och stämma med dess manifest
+(rows, first/last open_time). quality_reports/quality_report_datasets härleds från filerna,
+jämförs och byggs om som övriga tabeller. En rapport räknas som referens till sina objekt.
+Repair rör aldrig quality/.
 """
 from __future__ import annotations
 
@@ -57,6 +65,7 @@ from btc_trading_system.data.schema import DatasetKey
 from btc_trading_system.data_validation.errors import DataError
 from btc_trading_system.database import catalog
 from btc_trading_system.database import legacy as lg
+from btc_trading_system.database import quality_registry as qreg
 from btc_trading_system.database import versioned_store as vs
 from btc_trading_system.database.lineage import IngestRecord
 from btc_trading_system.database.refs import compact_json_bytes
@@ -70,7 +79,6 @@ CODES: dict[str, str] = {
     "ROOT_LAYOUT": "ERROR",
     "STORE_FILE_INVALID": "ERROR",
     "ROOT_FOREIGN_ENTRY": "WARN",
-    "QUALITY_UNSUPPORTED": "ERROR",
     "LOCK_MISSING": "WARN",
     "SYMLINK": "ERROR",
     "OBJECT_LAYOUT": "ERROR",
@@ -92,6 +100,9 @@ CODES: dict[str, str] = {
     "IMPORT_CORRUPT": "ERROR",
     "IMPORT_TARGET_MISSING": "ERROR",
     "IMPORT_LOG_MISMATCH": "ERROR",
+    "QUALITY_CORRUPT": "ERROR",
+    "QUALITY_TARGET_MISSING": "ERROR",
+    "QUALITY_BINDING_MISMATCH": "ERROR",
     "CATALOG_MISSING": "REPAIRABLE",
     "CATALOG_UNREADABLE": "REPAIRABLE",
     "CATALOG_NEWER_SCHEMA": "ERROR",
@@ -118,23 +129,25 @@ CATALOG_TABLES: tuple[tuple[str, tuple[str, ...], int], ...] = (
                        "previous_data_version", "params_json", "code_version", "worktree_clean",
                        "publication", "ref_outcome", "ref_log_seq", "duplicates_dropped"), 1),
     ("ingest_sources", ("ingest_seq", "source_index", "name", "sha256", "rows"), 2),
+    ("quality_reports", qreg.QR_COLUMNS, 1),
+    ("quality_report_datasets", qreg.QRD_COLUMNS, 2),
 )
-_QUALITY_TABLES = ("quality_reports", "quality_report_datasets")
 _REF_TABLES = frozenset({"ref_log", "refs", "ingest_events", "ingest_sources"})
 
 SCOPE_CHECKS: tuple[str, ...] = (
-    "root.layout", "root.store_file", "root.lock", "quality.absent",
+    "root.layout", "root.store_file", "root.lock",
     "objects.layout", "objects.verify_full", "objects.dir_mode", "objects.references",
     "ref_log.parse", "refs.files", "refs.consistency", "refs.targets",
     "snapshots.files", "snapshots.members",
     "ingests.chain", "ingests.ref_log", "ingests.targets",
     "imports.records", "imports.targets", "imports.ref_log",
+    "quality.files", "quality.targets",
     "catalog.open", "catalog.structure_full",
     *(f"catalog.rows.{t}" for t, _, _ in CATALOG_TABLES),
     "tmp.entries",
 )
 
-_ROOT_DIRS = frozenset({"objects", "refs", "snapshots", "ingests", "imports", "tmp"})
+_ROOT_DIRS = frozenset({"objects", "refs", "snapshots", "ingests", "imports", "quality", "tmp"})
 _ROOT_FILES = frozenset({vs.STORE_FILE, vs.LOCK_FILE, vs.REF_LOG_FILE, vs.CATALOG_FILE,
                          vs.CATALOG_FILE + "-journal"})
 _H = r"[0-9a-f]{32}"
@@ -143,6 +156,7 @@ _TF = "|".join(re.escape(tf) for tf in catalog.SCHEMA_TIMEFRAMES)
 _TMP_FILE_RE = re.compile(
     rf"{_H}\.ingest\.json|{_H}\.snapshot\.json|{_H}\.ref_log\.jsonl|{_H}\.(?:{_TF})\.json"
     rf"|{_H}\.import\.json"
+    rf"|{_H}\.quality\.json"
     rf"|\.store-{_H}\.json|\.catalog-{_H}\.sqlite\.tmp(?:-journal|-wal|-shm)?")
 
 
@@ -306,6 +320,7 @@ class _Verifier:
         self.check_snapshots()
         self.check_ingests()
         self.check_imports()
+        self.check_quality()
         self.check_references()
         self.check_catalog()
         self.check_tmp()
@@ -319,8 +334,6 @@ class _Verifier:
             present[p.name] = st
             if stat.S_ISLNK(st.st_mode):
                 self.add("SYMLINK", p.name, "symlänk i lagrets rot")
-            elif p.name == "quality":
-                self.add("QUALITY_UNSUPPORTED", p.name, "quality/ stöds inte före steg 6b")
             elif p.name in _ROOT_DIRS:
                 if not stat.S_ISDIR(st.st_mode):
                     self.add("ROOT_LAYOUT", p.name, "ska vara en katalog")
@@ -627,6 +640,46 @@ class _Verifier:
             self.done("imports.ref_log")
         self.counts["imports"] = len(records)
 
+    # ---- kvalitetsrapporter (steg 6b)
+    def check_quality(self) -> None:
+        reports: list[qreg.RegisteredReport] = []
+        d = self._real_dir(qreg.QUALITY_DIR)
+        if d is not None:
+            for p in sorted(d.iterdir()):
+                subject = self.rel(p)
+                if stat.S_ISLNK(os.lstat(p).st_mode):
+                    self.add("SYMLINK", subject, "symlänk under quality/")
+                    continue
+                try:
+                    rep = qreg._read_quality_file(p)[0]
+                except (qreg.QualityCorruptError, OSError) as e:
+                    self.add("QUALITY_CORRUPT", subject, str(e))
+                    continue
+                problem = qreg.config_problem(rep)
+                if problem is not None:
+                    self.add("QUALITY_CORRUPT", subject, problem)
+                    continue
+                reports.append(rep)
+        self.done("quality.files")
+        for rep in reports:
+            subject = f"{qreg.QUALITY_DIR}/{rep.report_sha256}{qreg.QUALITY_SUFFIX}"
+            row, ds_rows = rep.catalog_rows()
+            self.derived.rows["quality_reports"].add(row)
+            self.derived.rows["quality_report_datasets"].update(ds_rows)
+            for ref, binding in zip(rep.datasets, rep.bindings, strict=True):
+                did, dv = ref.dataset_id, ref.data_version
+                self.referenced.add((did, dv))
+                if not self._object_exists(did, dv):
+                    self.add("QUALITY_TARGET_MISSING", subject, f"{ref.key.relpath}/{dv} saknas")
+                elif (did, dv) in self.object_manifests:
+                    m = self.object_manifests[(did, dv)]
+                    have = (m["rows"], m["first_open_time"], m["last_open_time"])
+                    if have != binding:
+                        self.add("QUALITY_BINDING_MISMATCH", subject,
+                                 f"{ref.key.relpath}/{dv}: rapporten {binding} != objektet {have}")
+        self.done("quality.targets")
+        self.counts["quality_reports"] = len(reports)
+
     # ---- referenser (INFO)
     def check_references(self) -> None:
         for (did, dv), key in sorted(self.valid_objects.items()):
@@ -638,14 +691,12 @@ class _Verifier:
     # ---- katalog
     def check_catalog(self) -> None:
         path = self.root / vs.CATALOG_FILE
-        quality_rows = 0
         conn = self._open_catalog(path)
         self.done("catalog.open")
         if conn is None:
             self.skip("catalog.structure_full", "katalogen kan inte öppnas")
             for t, _, _ in CATALOG_TABLES:
                 self.skip(f"catalog.rows.{t}", "katalogen kan inte öppnas")
-            self._quality_done(0)
             return
         try:
             problems = catalog.check_catalog(conn, full=True)
@@ -655,11 +706,8 @@ class _Verifier:
             if problems:
                 for t, _, _ in CATALOG_TABLES:
                     self.skip(f"catalog.rows.{t}", "katalogens struktur är skadad")
-                self._quality_done(0)
                 return
             self.catalog_dump = catalog.dump_sha256(conn)
-            for qt in _QUALITY_TABLES:
-                quality_rows += conn.execute(f"SELECT count(*) FROM {qt}").fetchone()[0]
             for table, cols, nkey in CATALOG_TABLES:
                 if table in self.derived.unknown_tables:
                     self.skip(f"catalog.rows.{table}", self.derived.unknown_tables[table])
@@ -669,12 +717,6 @@ class _Verifier:
                 self.done(f"catalog.rows.{table}")
         finally:
             conn.close()
-        self._quality_done(quality_rows)
-
-    def _quality_done(self, rows: int) -> None:
-        if rows:
-            self.add("QUALITY_UNSUPPORTED", "catalog:quality_reports", f"{rows} rader före steg 6b")
-        self.done("quality.absent")
 
     def _open_catalog(self, path: Path) -> sqlite3.Connection | None:
         if not os.path.lexists(path):
