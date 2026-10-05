@@ -45,6 +45,14 @@ låst config); varje datasetpost måste peka på ett befintligt objekt och stäm
 (rows, first/last open_time). quality_reports/quality_report_datasets härleds från filerna,
 jämförs och byggs om som övriga tabeller. En rapport räknas som referens till sina objekt.
 Repair rör aldrig quality/.
+
+REBUILD (steg 8, rebuild_catalog_store) bygger om den härledda katalogen OVILLKORLIGT, dry-run som
+standard (apply=False). Samma skydd som repair: skrivarlåset (_WriterLock, utan att öppna
+katalogen; symlänkad .lock vägras), färsk verify under låset, ERROR -> RepairRefusedError och
+ingenting ändras. Ombyggnaden använder steg 5-mekanismen (_rebuild_catalog: hot journal rullas
+tillbaka, bygge i tmp/, atomisk ersättning), sedan verify igen. Resultatet bär katalogdumpens
+sha256 före och efter och om de är identiska (deterministisk dump/rebuild). Rebuild rör aldrig
+tmp/-rester (bara sin egen staging) och inget annat än catalog.sqlite.
 """
 from __future__ import annotations
 
@@ -249,6 +257,30 @@ class RepairResult:
     plan: RepairPlan
     applied: bool
     after: VerifyReport | None
+
+
+@dataclass(frozen=True)
+class RebuildResult:
+    before: VerifyReport
+    blocking: tuple[Finding, ...]          # alla ERROR-fynd (rebuild vägrar då)
+    applied: bool
+    after: VerifyReport | None
+
+    @property
+    def catalog_dump_sha256_before(self) -> str | None:
+        return self.before.catalog_dump_sha256
+
+    @property
+    def catalog_dump_sha256_after(self) -> str | None:
+        return None if self.after is None else self.after.catalog_dump_sha256
+
+    @property
+    def identical(self) -> bool | None:
+        """None i dry-run; annars True exakt när den ombyggda katalogens dump == den tidigare."""
+        if self.after is None:
+            return None
+        old = self.before.catalog_dump_sha256
+        return old is not None and old == self.after.catalog_dump_sha256
 
 
 # ------------------------------------------------------------------ härledda katalograder
@@ -883,6 +915,29 @@ def repair_store(root: str | Path, *, apply: bool = False) -> RepairResult:
         return RepairResult(before, plan, applied=True, after=after)
     finally:
         lock.release()
+
+
+def rebuild_catalog_store(root: str | Path, *, apply: bool = False) -> RebuildResult:
+    """Ovillkorlig katalogombyggnad (steg 8), dry-run som standard. Se modulens docstring (REBUILD)."""
+    store = vs.VersionedStore(root)
+    lock_file = store.root / vs.LOCK_FILE
+    if lock_file.is_symlink():
+        raise vs.StoreError(f"{vs.LOCK_FILE} är en symlänk; rebuild vägrar")
+    writer_lock = vs._WriterLock(lock_file)
+    writer_lock.acquire()
+    try:
+        report, rows = _verify(store, best_effort=False)
+        errors = tuple(x for x in report.findings if x.severity == "ERROR")
+        if not apply:
+            return RebuildResult(report, errors, applied=False, after=None)
+        if errors:
+            raise RepairRefusedError(
+                f"rebuild vägrar: {len(errors)} ERROR-fynd; ingenting ändrades", report)
+        _rebuild_catalog(store, rows)
+        rebuilt, _ = _verify(store, best_effort=False)
+        return RebuildResult(report, errors, applied=True, after=rebuilt)
+    finally:
+        writer_lock.release()
 
 
 def _rebuild_catalog(store: vs.VersionedStore, derived: _Derived) -> None:
