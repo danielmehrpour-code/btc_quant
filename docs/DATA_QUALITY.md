@@ -209,3 +209,8 @@ Fyndet ligger kvar som **`FAIL`**. Den låsta specifikationen kräver att
   kasserat vid ingest syns inte här.
 - `tf_aggregation` avgör inte vilken källa som är rätt när 1m- och 15m-arkiven
   inte stämmer med varandra. Den rapporterar bara att de är inkonsistenta (se avsnittet om verifiering).
+
+## Registrering i versionslagret (Phase 4)
+En `--out`-katalog kan registreras i Phase 4-versionslagret med `datastore register-report`.
+Rapporten lagras byte för byte och reproduceras först med den låsta konfigurationen
+(P4-S6b-b, P4-S6b-f, P4-S6b-i). Se `docs/PHASE4_DATASTORE.md`, avsnitt 5.7 och 9.2.

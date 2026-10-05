@@ -17,6 +17,9 @@ and ask the owner; never choose yourself.
 - `docs/VERIFICATION.md`: verification records (V1-V5), fingerprint method.
 - `docs/ENVIRONMENT.md`: supported environment.
 
+## Reference documents (derived from the code and the documents above, which win)
+- `docs/PHASE4_DATASTORE.md`: Phase 4 datastore layout, invariants, crash semantics, CLI runbook.
+
 ## Working process (G-12)
 - One spec step at a time; stop and wait for approval after each step.
 - Stage new code in `~/phase4_work/scratch/` first (persistent; never `/tmp`). Overlays and

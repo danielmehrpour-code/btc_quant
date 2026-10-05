@@ -290,6 +290,22 @@ Line references are to this commit.
 | P4-S8-IMPL12 | 4.8 | The catch-all handler carries `# noqa: BLE001` (precedent `btc_trading_system/data/binance_reader.py:94`). | Exit 70 for any other exception is the design (P4-S8-h). | owner decision 2026-10-05 (implementation choice 12); `btc_trading_system/database/cli.py:504` |
 | P4-S8-IMPL13 | 4.8 | One subprocess test puts a stub `git` on `PATH` so `ingest --apply` runs through the real entry point; the real-git run asserts exit 0 if `git_state()` reports a clean worktree, else 5. | The overlay has no `.git` and the repo is dirty before a commit; the stub keeps the test hermetic. | owner decision 2026-10-05 (implementation choice 13); `tests/test_database_cli.py:876`, `:884` |
 
+## Phase 4 Step 9: datastore documentation
+
+Drafts approved by the owner on 2026-10-05 (D-S9-a to D-S9-h; f, g and h assigned to Step 10).
+Verbatim approval: `~/phase4_work/STEP9_APPROVAL.md`. Drafts and checks: `~/phase4_work/scratch/step9/`.
+
+| ID | Phase/step | Decision | Rationale | Source |
+|---|---|---|---|---|
+| P4-S9-a | 4.9 | Phase 4 is documented in one new document, `docs/PHASE4_DATASTORE.md`: concepts and identities, store layout and file formats, catalog, invariants, crash semantics and recovery per write operation, reading, verify/repair/rebuild, CLI reference, operations runbook, known limits, spec coverage. Every factual claim cites a code location or a decision ID; decision texts are not copied. | The runbook depends on the crash and recovery tables; one file is kept in step with the code more easily. `docs/PHASE4_SPEC.md` line 399 ("9. docs") defines nothing further. | owner decision 2026-10-05 (D-S9-a) |
+| P4-S9-b | 4.9 | `docs/PHASE4_DATASTORE.md` is written in English; the additions to the Swedish Phase 2/3 documents are written in Swedish. | Same language as `DECISIONS.md`, `VERIFICATION.md`, `ENVIRONMENT.md` and `CLAUDE.md`; each existing document keeps its own language. | owner decision 2026-10-05 (D-S9-b) |
+| P4-S9-c | 4.9 | Pointers, additions only: `CLAUDE.md` gains a section "Reference documents" (not under "Authoritative documents"); `docs/DATA_INGESTION.md` gains section 7 and `docs/DATA_QUALITY.md` a section on registration in the versioned store. No other document changes. | The new document is derived from the code and must never outrank the spec or `DECISIONS.md`. | owner decision 2026-10-05 (D-S9-c) |
+| P4-S9-d | 4.9 → 13 | The code references in `docs/PHASE4_DATASTORE.md` are pinned to commit `168fe0d` (stated in its header); they are refreshed in Step 13. | The code does not change in the documentation commit; later steps move lines. | owner decision 2026-10-05 (D-S9-d) |
+| P4-S9-e | 4.9 | The reference checker (`check_refs.py`) and the runbook example runner (`run_examples.py`, 32 examples against a hermetic synthetic store, never `~/btc_data`) stay outside the repo in `~/phase4_work/scratch/step9/` and are re-run at phase close. | Like the mutation harnesses: tools for the verification, not part of the code. | owner decision 2026-10-05 (D-S9-e) |
+| P4-S9-f | 4.9 → 10 | Drift checks for `docs/PHASE4_DATASTORE.md` are built in Step 10: (2) its CLI command and exit-code tables equal `cli._parser()` and `EXIT_*`; (3) its finding-code table equals `integrity.CODES`. Check (1), resolving every `file:line` reference in a test, is not added; Step 13 refreshes the references instead (P4-S9-d). | Tables that mirror code are guarded; line references would force a document edit on every code change. | owner decision 2026-10-05 (D-S9-f) |
+| P4-S9-g | 4.9 → 10 | Finding F1: in `btc_trading_system/database/cli.py:286` the snapshot member key `"dataset": m.key.relpath` is overwritten by `**m.to_json_obj()` (the structured `dataset`), so it is dead code; the output equals the library's member objects. It is removed in Step 10 under its own decision. Until then `docs/PHASE4_DATASTORE.md` describes the actual output (sections 8 and 10). | Dead code that suggests a different output; no test caught it. | owner decision 2026-10-05 (D-S9-g) |
+| P4-S9-h | 4.9 → 10 | Finding F2: `integrity.rebuild_catalog_store` has no crash test of its own (its rebuild step is covered by repair's crash tests); one is added in Step 10. | Every write operation has its own crash test. | owner decision 2026-10-05 (D-S9-h) |
+
 ## UNCERTAIN (for the owner to decide; not decisions)
 
 Two open: U-08 and U-09 (below). U-01 to U-07 were resolved by the owner on 2026-09-30:

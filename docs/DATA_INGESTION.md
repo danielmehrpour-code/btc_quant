@@ -99,3 +99,9 @@ bars = p.get_bars("BTC/USDT", "15m", start=datetime(2024,1,1,tzinfo=timezone.utc
 * Spot och perp har olika priser/volymer; blanda dem aldrig utan explicit basis-logik.
 * Zero-volume-barer och exchange-underhåll kan skapa luckor; datat är exchange-specifikt (Binance).
 * Binance-filer antas oreviderade; ändrar Binance historik ändras `data_version` vid re-ingest.
+
+## 7. Phase 4: versionslagret
+Phase 2-lagret ovan är källan för `import-legacy` och skrivs aldrig av Phase 4 (P4-S6-SELF).
+Nya data kan ingestas direkt i Phase 4-versionslagret med `datastore ingest`, som kör samma
+Phase 2-pipeline oförändrad (P4-S4-FC), alltså samma regler som i avsnitt 2-3, men publicerar
+oföränderliga versioner med lineage. Se `docs/PHASE4_DATASTORE.md`, avsnitt 5.5 och 9.4.
