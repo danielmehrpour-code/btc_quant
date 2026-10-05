@@ -1237,6 +1237,34 @@ Data status
 
 
 
+51.1 MOBILE CONTROL PANEL (IPHONE)
+
+Built in Phases 18-19, together with paper trading. Its thresholds are locked in the hashed monitoring configuration before the first paper-trading day, as for the reports (docs/SPEC_MONITORING_REPORTS.md).
+
+1. Form. A Progressive Web App that the owner adds to the iPhone home screen. No App Store, no native build and no developer account; one codebase, updated without reinstalling; the same views also work in a desktop browser. It is a control panel for occasional viewing. Push notifications are not part of it; they come through Telegram (52.1).
+
+2. Strictly read-only. The panel never sends commands to the engine or the exchange, holds no exchange keys and has no trading controls. A remote kill switch is the only exception that may ever be considered: it may only reduce risk, needs strong authentication, and requires its own owner decision in Phase 19. Until then there is none.
+
+3. One source of truth. The engine computes every number; the panel only displays it. The panel, the Telegram alerts and the daily reports show identical values for the same moment. No language model computes or restates any number.
+
+4. Data path and access. The engine periodically publishes a read-only status snapshot with a versioned schema, a generation timestamp and no secrets. The panel reads only that snapshot. No inbound port to the owner's machine is opened to the internet; access is only through a private network (for example Tailscale) or authenticated private hosting.
+
+5. Freshness. Every view shows when its data was generated. Data older than a configured threshold is marked STALE; missing data is shown as an error, never as silently old values. Times are stored in UTC and displayed in Europe/Stockholm.
+
+6. Views (section 51 plus the following):
+- mode, PAPER or LIVE, always visible
+- equity curve
+- total P&L; P&L today, this week and this month; realized and unrealized P&L
+- active positions: entry price, current price, liquidation price and distance to liquidation in percent
+- open orders
+- leverage, exposure, risk level
+- current strategy
+- win rate and profit factor, always shown with the number of trades (and a confidence interval where available)
+- maximum and current drawdown
+- BTC price; funding, current and cumulative paid
+- live versus backtest: slippage versus the cost model and implementation shortfall
+- system health, data-feed status (time of the last bar), exchange connection, kill-switch status
+
 52. ALERTS
 
 Skicka alerts vid:
@@ -1250,6 +1278,24 @@ unusual volatility
 unexpected position
 kill switch
 
+
+52.1 TELEGRAM NOTIFICATIONS AND DAILY REPORTS
+
+Built in Phases 18-19; details in docs/SPEC_MONITORING_REPORTS.md.
+
+1. One-way channel. A Telegram bot that only sends. It never accepts commands; any incoming message is ignored and logged.
+
+2. Push alerts, sent immediately: every event in section 52, plus risk-limit breaches, drawdown thresholds, a stale data feed, a lost exchange connection, a position mismatch between the engine and the exchange, and every kill-switch activation.
+
+3. Daily reports: a morning report at 07:00 and an evening report at 20:00 Europe/Stockholm, with the contents defined in docs/SPEC_MONITORING_REPORTS.md.
+
+4. Numbers come only from the engine's own data and equal those in the control panel (51.1).
+
+5. Alerts have severity levels; repeated identical alerts are rate-limited and deduplicated, so that important alerts are not lost among repeats.
+
+6. A failed delivery is itself logged and shown in the control panel.
+
+7. The bot token is a secret and is handled as in section 49; it never goes into Git.
 
 53. SOFTWARE ARCHITECTURE
 

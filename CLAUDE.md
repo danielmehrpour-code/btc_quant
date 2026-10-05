@@ -10,7 +10,7 @@ and ask the owner; never choose yourself.
 - Quality and correctness are the only decision criteria; every check, test, review and verification is done in full; complexity only where it has a clear function (G-15).
 
 ## Authoritative documents (read, never reconstruct from memory)
-- `docs/MASTER_SPEC.md`: scope (sections 0-72, incl. 1.1 and 1.2).
+- `docs/MASTER_SPEC.md`: scope (sections 0-72 and their subsections, incl. 1.1 PRIMARY OBJECTIVE).
 - `docs/PHASE4_SPEC.md`: Phase 4 scope and step order.
 - `docs/DECISIONS.md`: all locked decisions (G-*, P*-*). Check it before any design choice.
 - `docs/LOOKAHEAD_POLICY.md`: causality rules for every feature, signal and fill.
