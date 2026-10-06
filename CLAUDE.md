@@ -27,7 +27,7 @@ and ask the owner; never choose yourself.
   syntax/import/ruff/mypy, overlay test results and mutation results.
 - Copy into the repo only byte-identical, approved files.
 - No commit, tag, push or reset without explicit approval.
-- Mutation harnesses live in `~/phase4_work/mutation/` until Phase 4 Step 11.
+- Mutation harnesses live in `scripts/mutation/` (from Phase 4 Step 11); run results stay outside the repo.
 
 ## Decision recording (G-11, G-13)
 - Every new decision goes into `docs/DECISIONS.md` in the same commit as its code

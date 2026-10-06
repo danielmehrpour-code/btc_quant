@@ -579,5 +579,5 @@ $DS verify                              # exit 64: UsageError (no --store)
 | refs, snapshots, pinned reads, causality | 4, 6 |
 | ingest lineage | 2, 5.5 |
 | integrity/verify, repair limits | 7, 5.8 |
-| mutation tests | not described here; harnesses outside the repo until Step 11 (P4-S8-n and the earlier mutation-set decisions) |
+| mutation tests | `scripts/mutation/` (one runner, one set per step, run in `git archive` overlays; results outside the repo; P4-S11-*) |
 | real-data migration | Step 12, not yet run (10) |
