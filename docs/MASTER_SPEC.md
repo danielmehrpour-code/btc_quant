@@ -93,6 +93,20 @@ These requirements serve 1.1. Numeric values and dates are locked at the phase s
 
 8. Taxes (Phase 10). Swedish tax rules can make each disposal of crypto a taxable event, which affects the profit that is actually kept, especially for high-turnover strategies. Evaluations report results both before and after a simplified, configurable tax estimate, plus turnover and the number of disposals. The tax estimate is an approximation for comparison only, not tax advice; the rules are verified against current Swedish rules or with an adviser before live use.
 
+1.3 PROJECT ECONOMICS, SUCCESS AND STOP CRITERIA
+
+These are owner decisions and serve 1.1. Each is recorded in docs/DECISIONS.md.
+
+1. Capital. At most 50,000 SEK is deployed. Every evaluation also states absolute results in SEK on this capital, so that the expected gain can be weighed against the effort.
+
+2. Success. A strategy, or a portfolio of strategies, is successful only if it beats both benchmarks net of all trading costs and Swedish taxes, on unseen data and with confidence intervals: (a) buy-and-hold BTC, and (b) a global equity index fund (MSCI World type) held in an investment savings account (ISK), net of the fund's fees and the ISK tax. Swedish taxation of crypto disposals can make (b) a materially higher hurdle than a pre-tax comparison. The exact index, the fund cost assumption and the tax model are locked in the hashed evaluation configuration before any Phase 6 result exists, and are verified against current Swedish rules; they are a comparison model, not tax advice.
+
+3. Development order after Phase 4. Section 64 governs: the first working version is a thin end-to-end slice (data, basic features, a simple baseline strategy, the backtester with conservative fees and slippage, basic risk and a performance report). Phases 5 to 10 in section 63 are first built only to the level that slice needs; later work deepens them when the edge test motivates it. Quality requirements (causality, verification, tests, locked decisions) are never reduced.
+
+4. Edge test and stop rule. A first batch of 10 to 20 pre-registered hypotheses (the exact number fixed before testing) is evaluated through the thin slice. If none meets the pre-registered criteria on VALIDATION against both benchmarks, the project changes direction to market-neutral funding and basis strategies, which need the data extension in 1.2 item 4. If those also fail, the project ends with the outcome "hold the index fund". Every hypothesis tried counts in the multiple-testing correction (1.1).
+
+5. Timing. Capital and benchmarks are fixed now. The data split is locked before Phase 5 (P1-05); the execution venue is chosen before Phase 6 (U-09).
+
 2. VIKTIGASTE PRINCIPEN
 
 Var skeptisk.
