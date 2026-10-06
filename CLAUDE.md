@@ -16,6 +16,7 @@ and ask the owner; never choose yourself.
 - `docs/LOOKAHEAD_POLICY.md`: causality rules for every feature, signal and fill.
 - `docs/VERIFICATION.md`: verification records (V1-V5), fingerprint method.
 - `docs/ENVIRONMENT.md`: supported environment.
+- `docs/ROADMAP.md`: order of work and gates after Phase 4 (stages A-H); no stage starts before its gate is passed.
 
 ## Reference documents (derived from the code and the documents above, which win)
 - `docs/PHASE4_DATASTORE.md`: Phase 4 datastore layout, invariants, crash semantics, CLI runbook.
