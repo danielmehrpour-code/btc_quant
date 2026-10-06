@@ -22,8 +22,9 @@ docs/DECISIONS.md conflict, stop and ask the owner (G-14).
 
 ## Known starting point
 
-The only real market data in the repository's stores is January 2025
-(store_quality_v1, migrated in Phase 4 Step 12). It was used only for data-quality
+The only real market data in the repository's stores covers 2024-12-01 to 2025-01-31
+for the 15m datasets and January 2025 for the 1m datasets (store_quality_v1, migrated
+in Phase 4 Step 12). It was used only for data-quality
 checks (P1-04). Multi-year history is needed before any data split or edge test is
 possible.
 
