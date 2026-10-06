@@ -194,7 +194,7 @@ row (`versioned_store.py:25-33`; order tested at `tests/test_database_versioned_
 |---|---|---|---|---|
 | staging | `tmp/<H>/` left | TMP_LEFTOVER (1) | repair | `tests/test_database_integrity.py:678-722` |
 | rename, before chmod | durable object, directory mode ≠ `0555`, no catalog row (+ `tmp/<H>/` after a process crash) | OBJECT_DIR_MODE, OBJECT_UNREGISTERED (+ TMP_LEFTOVER), exit 1; the same state is pinned for the import path at `tests/test_database_legacy.py:791` | the next publish of the same version verifies fully, then restores `0555` (P4-S2-02); repair for `tmp/` | `tests/test_database_versioned_store.py:653` |
-| chmod, before catalog | durable object, no catalog row (+ `tmp/<H>/` after a process crash) | OBJECT_UNREGISTERED (+ TMP_LEFTOVER), exit 1 | the next publish ("reused") or repair | `tests/test_database_versioned_store.py:629` |
+| chmod, before catalog | durable object, no catalog row (the staging directory is already removed) | OBJECT_UNREGISTERED, exit 1 | the next publish ("reused") or repair | `tests/test_database_versioned_store.py:629` |
 
 ### 5.3 set_current
 Order: verify the target fully, register it, append to `ref_log.jsonl`, replace the ref file,
@@ -278,7 +278,7 @@ catalog staging leftover, and a second repair gives a clean store.
 
 Rebuild (`integrity.py:49-55`, `integrity.py:920-941`, P4-S8-d) runs the same rebuild
 unconditionally and never removes `tmp/` leftovers. It uses the same mechanism
-(`integrity.py:943`), but has no crash test of its own (section 10).
+(`integrity.py:943`) and has the same crash property, tested in Step 10.
 
 ### 5.9 `tmp/` leftovers
 Repair removes only these exact names (H = 32 hex) and reports everything else as TMP_UNKNOWN,
@@ -331,7 +331,7 @@ fixes by a catalog rebuild: `integrity.py:123-124`. Codes by area:
 | ingests | INGEST_CORRUPT, INGEST_LOG_MISMATCH, INGEST_TARGET_MISSING, PENDING_INGEST (PENDING) |
 | imports | IMPORT_CORRUPT, IMPORT_TARGET_MISSING, IMPORT_LOG_MISMATCH (P4-S6-j) |
 | quality | QUALITY_CORRUPT, QUALITY_TARGET_MISSING, QUALITY_BINDING_MISMATCH (P4-S6b-l) |
-| catalog | CATALOG_MISSING, CATALOG_UNREADABLE, CATALOG_STRUCTURE, CATALOG_BEHIND (REPAIRABLE), CATALOG_NEWER_SCHEMA, CATALOG_CONFLICT |
+| catalog | CATALOG_MISSING (REPAIRABLE), CATALOG_UNREADABLE (REPAIRABLE), CATALOG_STRUCTURE (REPAIRABLE), CATALOG_BEHIND (REPAIRABLE), CATALOG_NEWER_SCHEMA, CATALOG_CONFLICT |
 | tmp | TMP_LEFTOVER (REPAIRABLE), TMP_UNKNOWN (WARN) |
 
 Unmarked codes are ERROR. Import records and registered reports count as references to their
@@ -554,11 +554,6 @@ $DS verify                              # exit 64: UsageError (no --store)
 
 ## 10. Known limits and open items
 
-- `rebuild_catalog_store` has no crash test of its own; its rebuild step is the one covered by
-  repair's crash tests (5.8).
-- `cli.py:286`: the snapshot member key `dataset` set to the relpath is overwritten by the
-  structured `dataset` from `DatasetVersionRef.to_json_obj()`; the output therefore equals the
-  library's member objects (section 8).
 - Linux `rename()` silently replaces an empty target directory; guarded by a check under the lock
   (P4-S2-03).
 - The `pending` flag a reader sees is advisory (P4-S3-01).

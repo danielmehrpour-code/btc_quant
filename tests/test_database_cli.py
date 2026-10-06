@@ -15,7 +15,6 @@ from pathlib import Path
 import pytest
 from data_helpers import NOW, make_klines, write_csv
 
-from btc_trading_system.data import quality_cli
 from btc_trading_system.data.ingest import ingest_dataset
 from btc_trading_system.data.schema import DatasetKey
 from btc_trading_system.data.storage import DatasetStore, ParquetBackend
@@ -865,8 +864,7 @@ def test_cli_is_a_thin_layer():
 
 # ================================================================== riktiga ingången (subprocess)
 def sub(cwd: Path, *argv, path: str | None = None, script: bool = False) -> R:
-    env = {"PATH": path or os.environ.get("PATH", "/usr/bin:/bin"), "PYTHONPATH": str(ROOT),
-           "PYTHONDONTWRITEBYTECODE": "1"}
+    env = sub_env(path)
     entry = [str(ROOT / "scripts" / "datastore.py")] if script else ["-m", "btc_trading_system.database.cli"]
     r = subprocess.run([sys.executable, *entry, *[str(a) for a in argv]], cwd=cwd, env=env,
                        capture_output=True, text=True, timeout=300, check=False)
@@ -887,7 +885,7 @@ def test_subprocess_write_group(w, tmp_path):
     t0 = datetime.now(UTC)
     dry = sub(tmp_path, "ingest", "--store", store, "--dataset", SPOT_D, w.inp / "new.csv")
     t1 = datetime.now(UTC)
-    version, clean = quality_cli.git_state()
+    version, clean = git_state_in(sub_env())
     ctx = dry.env["context"]
     assert dry.code == 0 and (ctx["code_version"], ctx["worktree_clean"]) == (version, clean)
     assert t0 <= datetime.fromisoformat(ctx["now"]) <= t1
@@ -952,3 +950,45 @@ def test_subprocess_usage_and_pending_group(w, tmp_path):
     assert c.code == 0 and c.env["result"] == {"kind": "ingest", "pending": []}
     s = sub(tmp_path, "verify", "--store", w.store, script=True)
     assert s.code == 0 and s.env["command"] == "verify"
+
+
+# ================================================================== steg 10: F3 (P4-S10-c) och CLI-detaljer
+def sub_env(path: str | None = None) -> dict[str, str]:
+    """Miljön för varje CLI-underprocess i denna fil (exakt den som sub() använder)."""
+    return {"PATH": path or os.environ.get("PATH", "/usr/bin:/bin"), "PYTHONPATH": str(ROOT),
+            "PYTHONDONTWRITEBYTECODE": "1"}
+
+
+def git_state_in(env: dict[str, str]) -> tuple[str, bool | None]:
+    """quality_cli.git_state() körd i exakt samma miljö som CLI-underprocessen: jämförelsen gäller
+    per konstruktion och beror inte på användarens globala git-konfiguration (F3)."""
+    code = "import json\nfrom btc_trading_system.data import quality_cli\nprint(json.dumps(quality_cli.git_state()))"
+    r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=120, check=True)
+    version, clean = json.loads(r.stdout)
+    return version, clean
+
+
+def test_snapshot_dry_run_for_a_dataset_without_ref_is_a_store_error(run, tmp_path):
+    store = fresh_store(tmp_path)
+    r = run("snapshot", "create", "--store", store, "--current", SPOT_D)
+    assert r.code == 6 and r.env["error"]["type"] == "NoCurrentRefError" and r.env["result"] is None
+
+
+def test_complete_pending_ref_with_nothing_pending(run, w):
+    r = run("complete-pending", "--store", w.store, "--kind", "ref", "--apply")
+    assert r.code == 0 and r.env["result"] == {"kind": "ref", "completed": []}
+
+
+def test_a_relative_store_path_is_left_as_typed(run, w, monkeypatch):
+    monkeypatch.chdir(w.base)
+    r = run("verify", "--store", "missing")
+    assert r.code == 6 and r.env["error"]["message"].startswith("missing: ")
+    assert "<store>" not in r.env["error"]["message"] and "<store>" not in r.err
+
+
+def test_snapshot_members_are_exactly_the_library_member_objects(run, w):
+    r = run("snapshot", "create", "--store", w.store, "--current", SPOT_D, "--current", PERP_D, "--apply")
+    snap = w.vs().read_snapshot(r.env["result"]["snapshot_id"])
+    expected = [m.to_json_obj() for m in snap.members]
+    assert r.env["result"]["members"] == expected
+    assert run("snapshot", "show", "--store", w.store, "--id", snap.snapshot_id).env["result"]["members"] == expected

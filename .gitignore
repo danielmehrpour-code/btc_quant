@@ -16,3 +16,4 @@ build/
 build/
 .ruff_cache/
 .mypy_cache/
+.claude/settings.local.json

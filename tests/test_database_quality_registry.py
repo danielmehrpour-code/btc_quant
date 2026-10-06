@@ -835,3 +835,28 @@ def test_report_for_a_non_current_version_registers_and_refs_are_untouched(env):
     assert apply(env.store, env.out).ok
     assert tree_hash(env.store.root / "refs") == refs
     assert (env.store.root / "ref_log.jsonl").read_bytes() == log
+
+
+# ================================================================== steg 10: strikt tolkning (P4-S6b-e)
+STRICT_DAMAGE = {
+    "config_field": (_edit(lambda o: o["config"].update(canonical_sha256="zz"), rename=False), "REPORT_INVALID",
+                     "config-fält"),
+    "dataset_entry_keys": (_edit(lambda o: o["datasets"][0].pop("rows"), rename=False), "REPORT_INVALID",
+                           "fel nycklar"),
+    "dataset_rows": (_edit(lambda o: o["datasets"][0].update(rows=0), rename=False), "REPORT_INVALID",
+                     "rows/first_open_time/last_open_time"),
+    "tf_pairing": (_edit(lambda o: o["datasets"][1].update(timeframe=o["datasets"][0]["timeframe"]),
+                         prefix="tf_spot", rename=False), "REPORT_INVALID", "tf-rapport"),
+    "checks_form": (_edit(lambda o: o.update(checks=[]), rename=False), "REPORT_INVALID", "checks har fel form"),
+    "check_status": (_edit(lambda o: o["checks"][0].update(status="MAYBE"), rename=False), "REPORT_INVALID",
+                     "kontrollstatus"),
+    "coverage_keys": (_edit(lambda o: o["coverage"].pop("gap_count"), rename=False), "REPORT_INVALID",
+                      "coverage har fel nycklar"),
+    "notes_form": (_edit(lambda o: o.update(notes=[1]), rename=False), "REPORT_INVALID", "notes har fel form"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(STRICT_DAMAGE))
+def test_strict_report_parsing_rejects_every_malformed_form(env, name, monkeypatch):
+    monkeypatch.setitem(REPORT_DAMAGE, name, STRICT_DAMAGE[name])
+    test_a_bad_report_fails_alone_and_writes_nothing(env, name)

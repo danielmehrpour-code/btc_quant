@@ -837,3 +837,24 @@ def test_ingest_after_import_follows_step4_rules(store, src, tmp_path):
     again = apply(store, src)
     assert by_rel(again)[SPOT15.relpath].ref_outcome == lg.REF_KEPT and again.ok
     assert ig.verify_store(store.root).exit_status == 0
+
+
+# ================================================================== steg 10: P4-S6-DEV2
+def test_captured_bytes_pass_phase2_in_tmp_before_publication(store, src, monkeypatch):
+    """Phase 2:s läsväg körs på exakt de fångade bytena i tmp/ innan de flyttas till objects/."""
+    other = src_file(src, PERP15, lg.DATA_SUFFIX).read_bytes()
+    real = lg._capture
+
+    def tampered(source, ds):
+        cap = real(source, ds)
+        return dataclasses.replace(cap, data_bytes=other) if ds.key == SPOT15 else cap
+    monkeypatch.setattr(lg, "_capture", tampered)
+    before = lg.source_tree_sha256(src)
+    r = apply(store, src)
+    bad = by_rel(r)[SPOT15.relpath]
+    assert (bad.status, bad.failure) == ("failed", "SOURCE_VERIFY_FAILED"), bad
+    nothing_written_for(store, SPOT15)
+    assert list(store.tmp.iterdir()) == []
+    assert sorted(d.relpath for d in r.datasets if d.status == "imported") == \
+        sorted(k.relpath for k in (SPOT1, PERP1, PERP15))
+    assert lg.source_tree_sha256(src) == before

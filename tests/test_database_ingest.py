@@ -832,3 +832,60 @@ def test_concurrent_reader_sees_only_complete_lineage(store, src):
             break
     assert child.wait(timeout=60) == 0
     assert len(reader.ingest_history()) == 4 and max(seen) <= 4
+
+
+# ================================================================== steg 10: slutförandets villkor (P4-S4-b)
+def test_complete_pending_ingest_refuses_while_a_ref_update_is_pending(store, src, monkeypatch):
+    ingest(store, [csv(src, "a.csv", n=60)])
+    with monkeypatch.context() as m:
+        crash(m, vs.StoreWriter, "_write_ref_file")
+        with pytest.raises(RuntimeError):
+            ingest(store, [csv(src, "b.csv", n=90)])
+    assert store.current_ref(KEY).pending
+    before = state_hash(store)
+    with store.writer() as w, pytest.raises(vs.PendingRefUpdateError):
+        w.complete_pending_ingest()
+    assert state_hash(store) == before
+
+
+def test_complete_refuses_when_the_planned_ref_log_line_cannot_be_reproduced(store, src, monkeypatch):
+    _pending_ingest(store, src, monkeypatch)
+    real = vs.StoreWriter._next_entry
+
+    def other_line(state, target, previous, action):
+        return real(state, target, previous, "set_current")
+    monkeypatch.setattr(vs.StoreWriter, "_next_entry", staticmethod(other_line))
+    before = state_hash(store)
+    with store.writer() as w, pytest.raises(vs.IngestCorruptError, match="kan inte reproduceras"):
+        w.complete_pending_ingest()
+    assert state_hash(store) == before
+
+
+# ================================================================== steg 10: strikt ingest-post (P4-S4-e)
+RECORD_DAMAGE = {
+    "source_name": lambda r: dataclasses.replace(r, sources=(IngestSource("", 1, h("s")),)),
+    "source_rows": lambda r: dataclasses.replace(r, sources=(IngestSource("a.csv", -1, h("s")),)),
+    "source_sha256": lambda r: dataclasses.replace(r, sources=(IngestSource("a.csv", 1, "zz"),)),
+    "now_not_iso": lambda r: dataclasses.replace(r, now="not-a-date"),
+    "seq1_with_prev": lambda r: dataclasses.replace(r, prev_ingest_id=h("p")),
+    "prev_invalid": lambda r: dataclasses.replace(r, seq=2, prev_ingest_id="zz"),
+    "publication": lambda r: dataclasses.replace(r, publication="copied"),
+    "previous_invalid": lambda r: dataclasses.replace(r, previous_data_version="zz"),
+    "changed_same_version": lambda r: dataclasses.replace(r, previous_data_version=r.ref.data_version),
+    "unchanged_with_link": lambda r: dataclasses.replace(r, ref_outcome="unchanged"),
+    "unchanged_previous": lambda r: dataclasses.replace(r, ref_outcome="unchanged", ref_log_seq=None,
+                                                        ref_log_entry_sha256=None, previous_data_version=None),
+    "sources_empty": lambda r: dataclasses.replace(r, sources=()),
+    "sources_unsorted": lambda r: dataclasses.replace(r, sources=(IngestSource("b.csv", 1, h("b")),
+                                                                  IngestSource("a.csv", 1, h("a")))),
+    "duplicates_dropped": lambda r: dataclasses.replace(r, duplicates_dropped=-1),
+    "code_version": lambda r: dataclasses.replace(r, code_version=""),
+    "worktree_clean": lambda r: dataclasses.replace(r, worktree_clean="yes"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(RECORD_DAMAGE))
+def test_every_invalid_ingest_record_is_rejected_on_construction(store, src, name):
+    rec = ingest(store, [csv(src, "a.csv")]).record
+    with pytest.raises(IngestRecordError):
+        RECORD_DAMAGE[name](rec)

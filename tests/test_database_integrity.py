@@ -1087,3 +1087,187 @@ def test_crash_during_repair_never_makes_the_store_worse(store, src, point):
     assert res.after.exit_status == 0, res.after.findings
     assert immutable_hash(store) == before
     assert_derived_matches(store)
+
+
+# ================================================================== steg 10: rebuild (P4-S8-d, P4-S9-h)
+@pytest.mark.parametrize("name", ERROR_DAMAGE)
+def test_rebuild_refuses_every_error_and_changes_nothing(store, src, name):
+    ctx = {**history(store, src), "src": src}
+    (store.tmp / f"{H}.snapshot.json").write_text("x")
+    DAMAGE[name](store, ctx)
+    before = tree_hash(store.root.parent, mtime=True)
+    dry = ig.rebuild_catalog_store(store.root)
+    assert dry.applied is False and dry.after is None and dry.blocking and dry.before.exit_status == 3
+    with pytest.raises(ig.RepairRefusedError) as e:
+        ig.rebuild_catalog_store(store.root, apply=True)
+    assert e.value.report.exit_status == 3
+    assert tree_hash(store.root.parent, mtime=True) == before
+
+
+@pytest.mark.parametrize("damage", [_catalog_extra_row, _snapshot_deleted, _unreferenced_object_deleted])
+def test_rebuild_never_rebuilds_over_catalog_evidence(store, src, damage):
+    ctx = {**history(store, src), "src": src}
+    damage(store, ctx)
+    evidence = dump(store)
+    assert ig.verify_store(store.root).by_code("CATALOG_CONFLICT")
+    with pytest.raises(ig.RepairRefusedError):
+        ig.rebuild_catalog_store(store.root, apply=True)
+    assert dump(store) == evidence
+
+
+def test_rebuild_refuses_a_symlinked_lock_file(store, src):
+    history(store, src)
+    target = store.root.parent / "elsewhere.lock"
+    target.write_text("")
+    os.unlink(store.root / ".lock")
+    (store.root / ".lock").symlink_to(target)
+    before = dump(store)
+    with pytest.raises(vs.StoreError, match="symlänk"):
+        ig.rebuild_catalog_store(store.root, apply=True)
+    assert dump(store) == before
+
+
+def test_rebuild_never_completes_pending_operations(tmp_path, src):
+    for kind in ("ref", "ingest"):
+        st = vs.VersionedStore.init(tmp_path / kind)
+        ctx = {**history(st, src), "src": src}
+        (_pending_ref if kind == "ref" else _pending_ingest)(st, ctx)
+        _catalog_missing(st, ctx)
+        before = immutable_hash(st)
+        res = ig.rebuild_catalog_store(st.root, apply=True)
+        code = "PENDING_REF_UPDATE" if kind == "ref" else "PENDING_INGEST"
+        assert res.applied and code in res.before.codes and code in res.after.codes
+        assert res.after.exit_status == 2 and res.identical is False and immutable_hash(st) == before
+        assert_derived_matches(st)
+        with st.writer() as w:
+            if kind == "ref":
+                assert len(w.complete_pending_ref_updates()) == 1
+            else:
+                assert w.complete_pending_ingest() is not None
+        assert ig.verify_store(st.root).exit_status == 0
+        assert_derived_matches(st)
+
+
+def test_rebuild_touches_only_the_catalog(store, src):
+    history(store, src)
+    (store.tmp / f"{H}.snapshot.json").write_text("x")
+    before, tmp_before, dump_before = immutable_hash(store), tree_hash(store.tmp), dump(store)
+    res = ig.rebuild_catalog_store(store.root, apply=True)
+    assert res.applied and res.identical is True and res.catalog_dump_sha256_after == res.catalog_dump_sha256_before
+    assert immutable_hash(store) == before and tree_hash(store.tmp) == tmp_before and dump(store) == dump_before
+    assert res.after.codes == {"TMP_LEFTOVER", "OBJECT_UNREFERENCED"}
+
+
+REBUILD_CRASHES = {k: REPAIR_CRASHES[k] for k in ("rebuild_before_replace", "before_final_verify")}
+
+
+@pytest.mark.parametrize("point", sorted(REBUILD_CRASHES))
+def test_crash_during_rebuild_never_makes_the_store_worse(store, src, point):
+    ctx = {**history(store, src), "src": src}
+    _catalog_behind(store, ctx)
+    before_report = ig.verify_store(store.root)
+    before = immutable_hash(store)
+    crash_child(store, REBUILD_CRASHES[point] + "ig.rebuild_catalog_store(st.root, apply=True)\n")
+    assert immutable_hash(store) == before
+    mid = ig.verify_store(store.root)
+    new = non_info(mid) - non_info(before_report)
+    assert all(code == "TMP_LEFTOVER" and subject.startswith("tmp/.catalog-") for code, subject in new), new
+    assert mid.exit_status <= before_report.exit_status
+    assert ig.repair_store(store.root, apply=True).after.exit_status == 0
+    again = ig.rebuild_catalog_store(store.root, apply=True)
+    assert again.identical is True and again.after.exit_status == 0
+    assert immutable_hash(store) == before
+    assert_derived_matches(store)
+
+
+# ================================================================== steg 10: kraschtabellernas verify-fynd
+def test_snapshot_crash_before_catalog_is_catalog_behind_and_repaired(store, src):
+    history(store, src)
+    crash_child(store, "vs.StoreWriter._register_snapshot = die\n"
+                       "with st.writer() as w:\n    w.snapshot_current([K])\n")
+    r = ig.verify_store(store.root)
+    assert {code for code, _ in non_info(r)} == {"CATALOG_BEHIND"}, r.findings
+    assert ig.repair_store(store.root, apply=True).after.exit_status == 0
+    assert_derived_matches(store)
+
+
+def test_ingest_crash_before_the_record_leaves_nothing_above_info(store, src):
+    history(store, src)
+    f = csv(src, "n.csv", n=200)
+    crash_child(store, "vs.StoreWriter._publish_ingest_record = die\n"
+                       f"with st.writer() as w:\n    w.ingest(K, [{str(f)!r}], now=NOW, code_version='t', "
+                       "worktree_clean=True)\n")
+    r = ig.verify_store(store.root)
+    assert non_info(r) == set(), r.findings
+    out = ingest(store, [f])
+    assert (out.record.publication, out.record.ref_outcome) == ("reused", "changed")
+    assert f"objects/{SPOT.relpath}/{out.record.ref.data_version}" in {x.subject for x in r.by_code("OBJECT_UNREFERENCED")}
+    assert ig.verify_store(store.root).exit_status == 0
+
+
+PUBLISH_CRASHES = {               # punkt -> (injektion, förväntade icke-INFO-fynd efter kraschen)
+    "rename_before_chmod": ("vs.StoreWriter._finish_dir = staticmethod(die)\n",
+                            {"OBJECT_DIR_MODE", "OBJECT_UNREGISTERED", "TMP_LEFTOVER"}),
+    "chmod_before_catalog": ("vs.StoreWriter._register = die\n", {"OBJECT_UNREGISTERED"}),
+}
+
+
+@pytest.mark.parametrize("point", sorted(PUBLISH_CRASHES))
+def test_publish_crash_states_have_the_stated_findings(store, src, point):
+    history(store, src)
+    body, expected = PUBLISH_CRASHES[point]
+    crash_child(store, body + "with st.writer() as w:\n    w.publish_version(K, canon_frame('15m', 30, seed=21))\n")
+    r = ig.verify_store(store.root)
+    assert {code for code, _ in non_info(r)} == expected, r.findings
+    publish(store, seed=21)                                  # nästa publicering verifierar, 0555, registrerar
+    ig.repair_store(store.root, apply=True)                  # tmp/-rester
+    assert ig.verify_store(store.root).exit_status == 0
+    assert_derived_matches(store)
+
+
+# ================================================================== steg 10: katalogbevis och symlänkar
+def test_a_changed_immutable_catalog_row_is_a_conflict_never_rebuilt_over(store, src):
+    """P4-S5-c: en ändrad (inte extra, inte saknad) rad för en oföränderlig entitet är CATALOG_CONFLICT."""
+    history(store, src)
+    _, derived = ig._verify(store, best_effort=False)
+    rows = sorted(derived.rows["dataset_versions"], key=repr)
+    i = vs._DV_COLUMNS.index("data_file_bytes")
+    changed = rows[0][:i] + (rows[0][i] + 1,) + rows[0][i + 1:]
+    derived.rows["dataset_versions"] = (set(rows) - {rows[0]}) | {changed}
+    catalog.rebuild_catalog(store.catalog_path, ig._populate(derived), staging_dir=store.tmp)
+    evidence = dump(store)
+    r = ig.verify_store(store.root)
+    conflict = r.by_code("CATALOG_CONFLICT")
+    assert [f.subject for f in conflict] == [f"catalog:dataset_versions/{rows[0][0]}/{rows[0][1]}"], r.findings
+    assert conflict[0].severity == "ERROR" and r.exit_status == 3
+    for fn in (ig.repair_store, ig.rebuild_catalog_store):
+        with pytest.raises(ig.RepairRefusedError):
+            fn(store.root, apply=True)
+    assert dump(store) == evidence
+
+
+def _symlink_under(sub: str):
+    def damage(st, ctx):
+        d = st.root / sub
+        d.mkdir(exist_ok=True)
+        target = st.root.parent / f"outside-{sub}.json"
+        target.write_text("{}")
+        (d / "link.json").symlink_to(target)
+    return damage
+
+
+SYMLINK_DAMAGE = {f"SYMLINK/{sub}": _symlink_under(sub) for sub in ("refs", "snapshots", "imports", "quality")}
+
+
+@pytest.mark.parametrize("name", sorted(SYMLINK_DAMAGE))
+def test_symlinks_under_every_record_directory_are_errors(store, src, name):
+    ctx = {**history(store, src), "src": src}
+    SYMLINK_DAMAGE[name](store, ctx)
+    r = ig.verify_store(store.root)
+    assert [(f.subject, f.severity) for f in r.by_code("SYMLINK")] == [(f"{name.split('/')[1]}/link.json", "ERROR")]
+    assert r.exit_status == 3
+    before = tree_hash(store.root.parent, mtime=True)
+    for fn in (ig.repair_store, ig.rebuild_catalog_store):
+        with pytest.raises(ig.RepairRefusedError):
+            fn(store.root, apply=True)
+    assert tree_hash(store.root.parent, mtime=True) == before

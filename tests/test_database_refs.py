@@ -779,3 +779,41 @@ def test_concurrent_reader_sees_old_or_new_version_never_a_mix(store, two_versio
     assert child.wait(timeout=60) == 0
     assert seen <= {v1, v2} and store.current_ref(SPOT).ref.data_version == v1
     assert len(log_lines(store)) == 13
+
+
+# ================================================================== steg 10: strikt tolkning av ref_log och ref-filer (P4-S1-05)
+def _edit_last_line_obj(change):
+    def edit(line: bytes) -> bytes:
+        import json  # lokal import: filens importblock är oförändrat
+        return compact_json_bytes(change(json.loads(line)))
+    return _edit_line(2, edit)
+
+
+def _ref_file_extra_key(st):
+    import json
+    p = ref_path(st, SPOT)
+    rewrite(p, vs.canonical_json_bytes({**json.loads(p.read_bytes()), "extra": 1}))
+
+
+TAMPER_STRICT = {
+    "line_not_json": _edit_line(2, lambda b: b"not json"),
+    "unknown_action": _edit_last_line_obj(lambda o: {**o, "action": "rename"}),
+    "previous_breaks_history": _edit_last_line_obj(lambda o: {**o, "previous_data_version": h("x")}),
+    "ref_file_not_json": lambda st: rewrite(ref_path(st, SPOT), b"not json"),
+    "ref_file_wrong_keys": _ref_file_extra_key,
+}
+
+
+@pytest.mark.parametrize("name", sorted(TAMPER_STRICT))
+def test_strict_ref_parsing_rejects_every_malformed_form(store, two_versions, name, monkeypatch):
+    monkeypatch.setitem(TAMPER, name, TAMPER_STRICT[name])
+    test_tampering_is_detected_by_readers_and_writers(store, two_versions, name)
+
+
+# ================================================================== steg 10: DataSnapshot.version_of (P4-S10-h)
+def test_snapshot_version_of():
+    v1, p1 = h("v1"), h("p1")
+    snap = DataSnapshot.of([DatasetVersionRef(PERP, p1), DatasetVersionRef(SPOT, v1)])
+    assert snap.version_of(SPOT) == DatasetVersionRef(SPOT, v1)
+    assert snap.version_of(PERP) == DatasetVersionRef(PERP, p1)
+    assert snap.version_of(SPOT1M) is None

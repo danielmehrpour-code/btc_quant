@@ -283,7 +283,7 @@ def _current_json(cur: vs.CurrentRef) -> dict[str, Any]:
 
 def _snapshot_out(snap: DataSnapshot, outcome: str | None) -> _Out:
     result: dict[str, Any] = {"snapshot_id": snap.snapshot_id,
-                              "members": [{"dataset": m.key.relpath, **m.to_json_obj()} for m in snap.members]}
+                              "members": [m.to_json_obj() for m in snap.members]}
     if outcome is not None:
         result["outcome"] = outcome
     return _Out(result, EXIT_OK, _sha256(snap.to_file_bytes()))
