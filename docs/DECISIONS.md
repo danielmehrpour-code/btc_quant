@@ -396,6 +396,24 @@ work in `~/phase4_work/scratch/step13/`. Verbatim instruction and approval: `~/p
 | P4-S13-c | 4.13 | The Step 13 mutation results are archived in `~/phase4_work/mutation/step13_run/` and its README is updated (P4-S11-d). | Same archive as the Step 11 runs. | owner decision 2026-10-07 (D-S13-c) |
 | P4-S13-d | 4.13 | The Step 13 commit (V5, the refreshed `docs/PHASE4_DATASTORE.md`, these entries) and the annotated tag `phase4-verified` on it are approved; nothing is pushed. | Phase 4 close (G-10, G-11). | owner decision 2026-10-07 (D-S13-d) |
 
+## Roadmap stage B Step 1: document tools in the repository
+
+Owner decisions of 2026-10-07 on the stage B design (D-B-a to D-B-i, with the answers to the D-B-h
+consistency check, points 1-7). Verbatim: `~/phase4_work/STAGEB_DBH_APPROVAL.md`. Design:
+`~/phase4_work/scratch/stageB/DESIGN_stageB.md` (section 3 for this step). Each stage B decision is
+recorded in the commit of the step it concerns; the data-split dates only in their own lock commit
+(P1-05). Work and evidence: `~/phase4_work/scratch/stageB/step1/`.
+
+| ID | Phase/step | Decision | Rationale | Source |
+|---|---|---|---|---|
+| SB-S1-a | B.1 | `check_refs.py` and `run_examples.py` move into the repository as `scripts/docs/check_refs.py` and `scripts/docs/run_examples.py` (inside the code fingerprint, linted, not collected by pytest). They are run by hand at every phase close and whenever `docs/PHASE4_DATASTORE.md` changes. Supersedes the location in P4-S9-e; carries out P4-S13-b. | The tools check the documentation of committed code and are pinned with it. | owner decision 2026-10-07 (D-B-f) |
+| SB-S1-b | B.1 | `run_examples.py` takes `--scratch DIR` and works only in `DIR/docs-examples/`, marked with `.docs-examples`; an existing work directory is removed only if it is a real directory carrying a regular marker file. `--scratch` follows the mutation runner's rule (`scripts/mutation/runner.py` `check_scratch`, P4-S11-e) and may also not be or lie inside `~/btc_data` (`ExamplesSafetyError`, nothing written). The result goes to `DIR/docs-examples/examples_result.txt`. | A tool that deletes its work directory must never delete anything it did not create. | owner decision 2026-10-07 (D-B-f) |
+| SB-S1-c | B.1 | `run_examples.py` runs against the repository when its worktree is clean, otherwise against a clean clone of HEAD made with `--no-hardlinks` in the work directory; every subprocess gets `PYTHONPATH=<repo>` and the tool checks that the package is imported from there. The output names the repository and commit used. | `ingest --apply` needs a clean worktree (P4-S8-g); hard links would let `chmod -R u+w` during cleanup change the repository's object files; the editable install must not silently supply other code. | owner decision 2026-10-07 (D-B-f; clone details: implementation choice) |
+| SB-S1-d | B.1 | The 32 example commands are a table `COMMANDS` in `run_examples.py`; `tests/test_docs_tools.py` checks statically that its (command, exit code) pairs equal the runbook lines of `docs/PHASE4_DATASTORE.md` section 9 that state exactly one exit code, and pins the two runbook lines that state none. | Runbook and examples cannot drift apart unnoticed. | owner decision 2026-10-07 (D-B-f) |
+| SB-S1-e | B.1 | Finding F-B1: the decision-ID pattern of `check_refs.py` (`P\d-S\d[a-z]?-…`) did not match two-digit steps, so IDs `P4-S10-*` to `P4-S13-*` were never looked up. Fixed (`S\d+`). On `docs/PHASE4_DATASTORE.md` at `0c79351` the fixed checker finds 172 code references and 86 decision IDs (before: 85), 0 problems. | Found by the new parser test. | owner decision 2026-10-07 |
+| SB-S1-f | B.1 | Verification of this step: `tests/test_docs_tools.py` (21 tests, no `file:line` resolution, P4-S9-f); an ad-hoc mutation check in scratch (16 mutations of the safety rules, the runbook table and the parser, all killed); `run_examples` 32/32 in both repository modes (clean worktree, clean clone) with results identical to Step 13 except the commit. No harness set is added to `scripts/mutation/`. | Each guarantee has a test that a mutation proves; the step changes no package code. | owner decision 2026-10-07 |
+| SB-S1-g | B | Recording rule for stage B: every D-B decision (D-B-a to D-B-i) and every answer to the D-B-h consistency check (points 1-7) is recorded in `docs/DECISIONS.md` in the commit of the stage B step it concerns; the data-split dates only in their own lock commit (P1-05), which follows a separate commit that changes the `DataSplitConfig` schema without the dates. Stage B step IDs have the form `SB-S<step>-<letter>`. | One commit per step with its own decisions (G-11); the split stays in its own commit. | owner decision 2026-10-07 |
+
 ## UNCERTAIN (for the owner to decide; not decisions)
 
 Two open: U-08 and U-09 (below). U-01 to U-07 were resolved by the owner on 2026-09-30:
