@@ -232,3 +232,108 @@ The finding remains `FAIL`, as the locked specification requires.
 It was not downgraded.
 
 Addendum (recorded 2026-09-30): after the owner's review, the tag phase3-verified was created at 6eef6c7.
+
+## V5 — PHASE 4 database / storage (2026-10-07)
+
+**Status: PASSED.** Final verification of Phase 4 (Step 13). Decisions: `docs/DECISIONS.md` (P4-*); reference: `docs/PHASE4_DATASTORE.md`.
+
+| Item | Value |
+|---|---|
+| Platform | Linux 6.18.33.2-microsoft-standard-WSL2 (WSL2 on Windows) |
+| python | 3.12.3 |
+| pytest | 9.1.1 |
+| pandas | 3.0.6 |
+| numpy | 2.5.3 |
+| pyarrow | 25.0.1 |
+| sqlite | 3.45.1 |
+| ruff / mypy | ruff 0.16.9 / mypy 2.3.1 (compiled: yes) |
+| Verified commit | `c51d20841d271a7035d9c7c65d12132c1e0c9d09` (clean worktree) |
+| Last code-changing commit | `20e7581` (later commits change documentation only) |
+| Code fingerprint | `8e83efb3cca627ea8f935d275e4d24f21f546c94e4225a6f994b895a1ac8bb19` (method as in V1; clean clone: `8e83efb3cca627ea8f935d275e4d24f21f546c94e4225a6f994b895a1ac8bb19`) |
+
+### Automated checks
+
+- pytest in the repository: 1171 passed in 248.22s (0:04:08).
+- pytest in a throwaway clean clone of `c51d208` (worktree clean before and after): 1171 passed in 252.42s (0:04:12).
+- ruff: 41 findings, the same count as V3/V4; the set is identical to the Step 11 baseline, and every Phase 4 step added 0 findings.
+- mypy: Found 27 errors in 17 files (checked 45 source files) = the V4 baseline 24 + 3 expected `[import-untyped]` (pandas) in `btc_trading_system/database/{versioned_store,legacy,quality_registry}.py` (G-08). No other new error.
+- Mutation tests (G-20 (3), P4-S11): all sets on `c51d208` with `--parallel 4`: **125/125 killed**, every baseline green, every overlay restored.
+
+| Set | Killed | summary |
+|---|---|---|
+| step2 | 8/8 | baseline green, restored True, 1.9 min |
+| step3 | 12/12 | baseline green, restored True, 4.8 min |
+| step4 | 15/15 | baseline green, restored True, 4.2 min |
+| step5 | 14/14 | baseline green, restored True, 28.9 min |
+| step6 | 16/16 | baseline green, restored True, 45.7 min |
+| step6b | 16/16 | baseline green, restored True, 54.2 min |
+| step7 | 12/12 | baseline green, restored True, 5.8 min |
+| step8 | 15/15 | baseline green, restored True, 5.4 min |
+| step10 | 11/11 | baseline green, restored True, 42.4 min |
+| step11 | 6/6 | baseline green, restored True, 3.4 min |
+
+  Run directory `mutation-run-c51d20841d27-20261006T210234Z`; `summary.json` sha256 `56fe208e6e9f792e3162e5f428abafba131a5c254a2c854faf1282666c6b6360`. Memory during the parallel run: peak 1741 MiB used, at least 6073 MiB available, swap 154 MiB at start and 161 MiB at peak (P4-S11-PAR). The Step 11 runs: sequential `b7e6ce43…433f2`, parallel `b1f765f1…c79c48`.
+- Runbook examples (`docs/PHASE4_DATASTORE.md` section 9, P4-S9-e): 32/32 examples OK.
+- Reference check of `docs/PHASE4_DATASTORE.md`: 172 code references, 85 decision IDs; problems: 0.
+
+### Finding F3 (P4-S10-d)
+
+From `168fe0d` until `98cdead`, `tests/test_database_cli.py::test_subprocess_write_group` failed whenever the
+worktree was clean: the CLI subprocess ran without `HOME`, so git did not read the user's global ignore file
+(`.claude/settings.local.json`) and reported the worktree as unclean, while the test process reported it clean.
+The Step 8 and Step 9 reports ("1068 passed") were true for the dirty worktree they ran in. Fixed in `98cdead`
+(the test computes the expected state in the CLI's environment; `.gitignore` ignores the file). The clean-clone
+run above is the check that guards against a repeat.
+
+### Real-data migration (Step 12, P4-S12-RES)
+
+Store `~/btc_data/datastore_v1`, migrated with the committed CLI at `856c9fe` (code identical to the
+verified commit), after a clean rehearsal on byte-identical copies; all 35 evidence values and all 22 CLI outputs
+of the rehearsal and the real run are identical. Evidence: `~/phase4_work/step12_evidence/`
+(`real/evidence.json` sha256 `67dfcac62c3d595a6426bec4f7e2e90e1a9383d753f0070dbe7fa19520e8c9a8`, `real/equivalence.json` sha256 `64d87fe5feb5464844c6eab6f8907d248c3262d748b9df7880df2ae4cf18cf85`).
+
+| Dataset | data_version | import_id | record_sha256 |
+|---|---|---|---|
+| binance/perp/BTCUSDT/15m | `d790427420bc4fcd6389b7da814d1a6d8441db916888a9d79730262239a50833` | `b215724b93e2f6879ecf2a3af0d4a4ab35db905e6150c70e11ebd17f68f64f30` | `070de90db7c307e2f1c009c757a8c94b68f8c6dda679d00b4343516a5f875dc8` |
+| binance/perp/BTCUSDT/1m | `a86139cd0fc335214146165fdfeff8ffbc2f69071d221fcc2080c56b039bef7a` | `a2e1eb5c07bc10acb8d89874ce909e1a96aebd7d4df53378ebb4ea8f5f730fe5` | `5650094dd64ae63c16eac2a1c9a630fafe40cf1a725cb0d2f6a6618e89a33ad8` |
+| binance/spot/BTCUSDT/15m | `32585a79980d658f97444069ec45f98165f5c144d6453dc1a8f4804a6b1f880f` | `26e553a2b508f385ddcff8057c11a5a9482144670e94959c4598c796101fe011` | `de60bacd0f32ea91fe7048ec613975a4ef0e0c54f845b23002cf37090ee54d13` |
+| binance/spot/BTCUSDT/1m | `2185582e271f3bc0ae123a9d5959cfcddd1722f027f04011c139fbc4fbddc202` | `adad797a923bb53e443ec3a6e9f16d9828fa79ab6fca954ad8c885642c6b2534` | `760dea41e2bd6b84f4c2b16a1ebba7078489082d579079a78b39bd3278e38689` |
+
+| Quality report (run1 = run2) | Type | Overall | report_sha256 |
+|---|---|---|---|
+| `dataset_perp_BTCUSDT_15m_d790427420bc4fcd.quality.json` | dataset | WARN | `1486ee408fc85bce661fee9a37050f8aae971cc71112011bc2022578c8866646` |
+| `dataset_perp_BTCUSDT_1m_a86139cd0fc33521.quality.json` | dataset | WARN | `80a5d82f3be535365dfd41ab1ca2833108fff10a783c1d24b1f16c678e10c7bb` |
+| `dataset_spot_BTCUSDT_15m_32585a79980d658f.quality.json` | dataset | WARN | `8796585f1433d06872bba9b265b9db8783dc73a4d203faa3ec218d40322a958a` |
+| `dataset_spot_BTCUSDT_1m_2185582e271f3bc0.quality.json` | dataset | WARN | `621a892af890e7a2b12e9a83b2b710a95033faa5489bcac1526e1040f8568e57` |
+| `tf_perp_BTCUSDT_1m-15m_a86139cd0fc3_d790427420bc.quality.json` | tf_aggregation | FAIL | `a04d6d7d3bf7a7e66ee9ea5e80d6781891fe6a5feec525574a9e3aa198d59351` |
+| `tf_spot_BTCUSDT_1m-15m_2185582e271f_32585a79980d.quality.json` | tf_aggregation | PASS | `050cfd4246d5bcd3218ba5477195945811c97aedbbbf587e4090958a3d10f595` |
+| `xinst_BTCUSDT_15m_32585a79980d_d790427420bc.quality.json` | cross_instrument | PASS | `dc186744bb02b2cbb826e6f254aed11cce17bc7e3d8fc6abc191fe7032de13dd` |
+| `xinst_BTCUSDT_1m_2185582e271f_a86139cd0fc3.quality.json` | cross_instrument | PASS | `d9a4f49e232e793de29d17f67e3b30d1c84f01e1d92de00ad22edd9bf25111af` |
+
+The `tf_aggregation` FAIL of perp 1m-15m is the V4 finding `TF_AGGREGATION_MISMATCH`; it stays FAIL (P3-04).
+
+| Item | Value |
+|---|---|
+| Snapshot of the four datasets | `36696042d4cd6ab73b358be8f3f13119f30e7424e6d55bbce99c93539fec8e00` |
+| Verify report sha256 (Step 12, final) | `866029e39afcf4fb88c822bcc77a15409e1f30cdbf3fb65c9584d55edf87f0a2` |
+| Catalog dump sha256 (rebuild identical) | `d499e75f06ee94c8b1dbbb5fac9ac791e4e053914dab98636a12b1408202b620` |
+| Store tree hash after migration | `f6c407e437e56a1b9f41f9582ad56ae97cc92ad6fe6f7284cf4cad033cd1b021` |
+| Step 13 re-verify of the store | exit 0, report sha256 `866029e39afcf4fb88c822bcc77a15409e1f30cdbf3fb65c9584d55edf87f0a2`; store tree hash before `f6c407e437e56a1b9f41f9582ad56ae97cc92ad6fe6f7284cf4cad033cd1b021`, after `f6c407e437e56a1b9f41f9582ad56ae97cc92ad6fe6f7284cf4cad033cd1b021` |
+
+### Source and data tree hashes
+
+Method: `~/phase4_work/treehash.sh` (paths, modes and contents).
+
+| Directory under `~/btc_data` | Before Step 13 | After Step 13 |
+|---|---|---|
+| `store_quality_v1` | `a8f2fd15e2450edb77d6064dc090ca4ee7817f94b67e5b60e738d8db6f2be50b` | `a8f2fd15e2450edb77d6064dc090ca4ee7817f94b67e5b60e738d8db6f2be50b` |
+| `quality_reports_v1` | `e673a327b8d5d74453f19952be98201ce413fe7f2b9c3cf46d0e7e593a369038` | `e673a327b8d5d74453f19952be98201ce413fe7f2b9c3cf46d0e7e593a369038` |
+| `datastore_v1` | `f6c407e437e56a1b9f41f9582ad56ae97cc92ad6fe6f7284cf4cad033cd1b021` | `f6c407e437e56a1b9f41f9582ad56ae97cc92ad6fe6f7284cf4cad033cd1b021` |
+| `investigate_tf_v1` | `066bd09c6a2162419b93e49ba6e346d73cba6eb3bad35cc79a0eb1aa42a5f1b5` | `066bd09c6a2162419b93e49ba6e346d73cba6eb3bad35cc79a0eb1aa42a5f1b5` |
+| `raw` | `196b8631a791dadaea7692ccf2bfa07324849836c529f53adbf7a03af50288ba` | `196b8631a791dadaea7692ccf2bfa07324849836c529f53adbf7a03af50288ba` |
+| `store_smoke_v1` | `bc1b94ce258c2ff985e189ab6249edebffaefab19e347f9bc064d700f0ed50e2` | `bc1b94ce258c2ff985e189ab6249edebffaefab19e347f9bc064d700f0ed50e2` |
+| `store_smoke_v1_rerun` | `bc1b94ce258c2ff985e189ab6249edebffaefab19e347f9bc064d700f0ed50e2` | `bc1b94ce258c2ff985e189ab6249edebffaefab19e347f9bc064d700f0ed50e2` |
+
+`store_quality_v1` and `quality_reports_v1` equal their Phase 3 baselines (`a8f2fd15…be50b`, `e673a327…69038`)
+throughout Phase 4; they were also checked after every command of the Step 12 migration (24 checks).
+

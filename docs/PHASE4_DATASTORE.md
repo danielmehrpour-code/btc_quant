@@ -7,13 +7,14 @@ describes; it decides nothing. The authoritative sources are `docs/PHASE4_SPEC.m
 this document is wrong.
 
 **References.** Every factual statement cites a code location or a decision ID. Code locations
-are `file:line` at commit `168fe0d`. Bare module names (`versioned_store.py`, `integrity.py`,
+are `file:line` at commit `20e7581`, the last Phase 4 commit that changes code (later commits change
+only documentation, so the references hold for them too). Bare module names (`versioned_store.py`, `integrity.py`,
 `legacy.py`, `quality_registry.py`, `catalog.py`, `refs.py`, `lineage.py`, `cli.py`) are in
 `btc_trading_system/database/`; tests are in `tests/`. Decision texts are not repeated here; the
 IDs point into `docs/DECISIONS.md`.
 
-**Status.** Steps 1-8 of `docs/PHASE4_SPEC.md` are implemented. The real-data migration (Step 12)
-and the final verification (Step 13, V5) have not run yet; nothing here describes real data.
+**Status.** Steps 1-13 of `docs/PHASE4_SPEC.md` are done. The real data was migrated into
+`~/btc_data/datastore_v1` in Step 12 (P4-S12-RES); the final verification is V5 in `docs/VERIFICATION.md`.
 
 Contents
 1. Concepts and identities
@@ -558,7 +559,6 @@ $DS verify                              # exit 64: UsageError (no --store)
   (P4-S2-03).
 - The `pending` flag a reader sees is advisory (P4-S3-01).
 - Range reads are not wired into `LocalOHLCVProvider` (P4-S7-a).
-- Step 12 (real-data migration) and Step 13 (V5) are still to come.
 
 ---
 

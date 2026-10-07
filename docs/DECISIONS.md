@@ -380,6 +380,22 @@ Design approved by the owner on 2026-10-07 (D-S12-a to D-S12-g; a clarified, b e
 | P4-S12-RES | 4.12 | Result (rehearsal and real run both clean, 2026-10-07): 4 datasets imported byte for byte with their Phase 2 data_versions; 8 Phase 3 reports registered from run1 (4 WARN, 3 PASS, 1 FAIL), run2 `existing/existing`; snapshot `36696042d4cd6ab73b358be8f3f13119f30e7424e6d55bbce99c93539fec8e00`; final verify exit 0, report sha256 `866029e39afcf4fb88c822bcc77a15409e1f30cdbf3fb65c9584d55edf87f0a2`, catalog dump sha256 `d499e75f06ee94c8b1dbbb5fac9ac791e4e053914dab98636a12b1408202b620` (rebuild identical); equivalence 2,124 range/as_of comparisons plus full-frame, identity, coverage and gap checks, all equal; source tree hashes `a8f2fd15…be50b` and `e673a327…69038` unchanged after all 24 checks; the other four `~/btc_data` directories unchanged; all 35 evidence values and all 22 CLI outputs identical between rehearsal and real run. Import ids, record sha256 and report sha256: `~/phase4_work/step12_evidence/real/evidence.json` (sha256 `67dfcac6…c11a`). | Recorded result; V5 repeats it. | measurement 2026-10-07 |
 | P4-S12-DOC | 4.12 | Factual correction in `docs/ROADMAP.md`, "Known starting point": the real data in `store_quality_v1` covers 2024-12-01 to 2025-01-31 for the 15m datasets and January 2025 for the 1m datasets (the text said "January 2025" only). Only that statement changes (two lines re-wrapped into three); G-13 allows a visible correction of a document that is not a decision text. | Found during Step 12 from the source manifests (`first_open_time`/`last_open_time`). | owner decision 2026-10-07 |
 
+## Phase 4 Step 13: final verification
+
+Run on 2026-10-06/07 on commit `c51d208` (code identical to `20e7581`, code fingerprint `8e83efb3…bb19`); all
+work in `~/phase4_work/scratch/step13/`. Verbatim instruction and approval: `~/phase4_work/scratch/step13/prepared/STEP13_INSTRUCTION.md`,
+`~/phase4_work/scratch/step13/prepared/STEP13_APPROVAL_AND_STAGEB.md`.
+
+| ID | Phase/step | Decision | Rationale | Source |
+|---|---|---|---|---|
+| P4-S13-RES | 4.13 | Final verification result, recorded as V5 in `docs/VERIFICATION.md` (G-10): pytest 1171 passed in the repository and in a throwaway clean clone; ruff 41 (0 new), mypy 27 (V4 24 + 3 `[import-untyped]`, G-08); all mutation sets with `--parallel 4` 125/125 killed (G-20 (3), P4-S11-PAR; killing tests identical to the Step 11 sequential run); runbook examples 32/32 and reference check 0 problems (P4-S9-e); `~/btc_data/datastore_v1` re-verified read-only with exit 0 and the P4-S12-RES report sha256; all `~/btc_data` tree hashes unchanged. | Phase 4 close. | measurement 2026-10-07 |
+| P4-S13-REF | 4.13 | `docs/PHASE4_DATASTORE.md`: the pinned code references are refreshed to `20e7581`, the last Phase 4 commit that changes code (P4-S9-d); all 172 references cite the same lines as at `168fe0d` (only the text inside `cli.py:284-289` changed, by the F1 fix). The two status statements that Steps 12 and 13 made false (the header "Status" paragraph and the last bullet of section 10) are updated. | The references must hold for the tagged tree. | owner decision 2026-10-07 |
+| P4-S13-TAG | 4.13 | The tag `phase4-verified` is an annotated tag on the commit that adds V5. | Same practice as `phase2-verified` and `phase3-verified`. | owner decision 2026-10-07 |
+| P4-S13-a | 4.13 | `docs/PHASE4_DATASTORE.md` takes variant (b): the refreshed pin (P4-S13-REF) plus the two corrected status statements. | The tagged document must be true. | owner decision 2026-10-07 (D-S13-a) |
+| P4-S13-b | 4.13 → stage B | `check_refs.py` and `run_examples.py` stay outside the repo for the Phase 4 tag; they move into the repo as the first commit of roadmap stage B, under their own decision. Supersedes the timing in P4-S11-g ("until Step 13"). | Moving them now would change the code fingerprint after V5. | owner decision 2026-10-07 (D-S13-b) |
+| P4-S13-c | 4.13 | The Step 13 mutation results are archived in `~/phase4_work/mutation/step13_run/` and its README is updated (P4-S11-d). | Same archive as the Step 11 runs. | owner decision 2026-10-07 (D-S13-c) |
+| P4-S13-d | 4.13 | The Step 13 commit (V5, the refreshed `docs/PHASE4_DATASTORE.md`, these entries) and the annotated tag `phase4-verified` on it are approved; nothing is pushed. | Phase 4 close (G-10, G-11). | owner decision 2026-10-07 (D-S13-d) |
+
 ## UNCERTAIN (for the owner to decide; not decisions)
 
 Two open: U-08 and U-09 (below). U-01 to U-07 were resolved by the owner on 2026-09-30:
