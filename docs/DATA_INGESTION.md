@@ -105,3 +105,23 @@ Phase 2-lagret ovan är källan för `import-legacy` och skrivs aldrig av Phase 
 Nya data kan ingestas direkt i Phase 4-versionslagret med `datastore ingest`, som kör samma
 Phase 2-pipeline oförändrad (P4-S4-FC), alltså samma regler som i avsnitt 2-3, men publicerar
 oföränderliga versioner med lineage. Se `docs/PHASE4_DATASTORE.md`, avsnitt 5.5 och 9.4.
+
+## 8. Etapp B: arkivet med Binance-filer (`scripts/data/fetch_binance.py`)
+Verktyget hämtar månadsfilerna för etapp B (D-B-a: spot och perp 1m/15m samt funding,
+2020-01 till och med 2026-09, 405 filer) från `https://data.binance.vision/` och kontrollerar varje
+fil mot sin `.CHECKSUM` innan den räknas som hämtad. Arkivet ligger i `~/btc_data/binance_archive_v1`
+och skrivs bara av verktyget (SB-S2-a, SB-S2-b).
+```bash
+python scripts/data/fetch_binance.py plan    --root ~/btc_data/binance_archive_v1          # offline
+python scripts/data/fetch_binance.py fetch   --root ~/btc_data/binance_archive_v1 --apply  # hämtar det som saknas
+python scripts/data/fetch_binance.py verify  --root ~/btc_data/binance_archive_v1          # offline, full kontroll
+python scripts/data/fetch_binance.py recheck --root ~/btc_data/binance_archive_v1 --apply  # reviderade filer (D-B-e)
+```
+* Exit: 0 komplett och verifierat; 1 ofullständigt; 2 `recheck` fann en skillnad; 3 ERROR (ingenting
+  skrivs); 5 vägrat; 64 användning; 70 internt (SB-S2-c).
+* Filerna behåller arkivets namn (`objects/<arkivkatalog>/<namn>/<namn>`), så regel 1b gäller vid
+  ingest; spot och perp ligger i olika kataloger. Ingest i steg 7 läser bara `objects/`.
+* En fil som Binance har ändrat skriver aldrig över originalet: `recheck --apply` sparar den under
+  `revisions/` och den läses in först efter ägarens beslut (D-B-e).
+* Förteckningen `inventory/<sha256>.json` är deterministisk (inga tidpunkter); tider och kodversion
+  finns bara i `runs/` (SB-S2-b).

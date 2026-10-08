@@ -43,10 +43,10 @@ ROOT = Path(__file__).resolve().parents[2]
 SETS_DIR = Path(__file__).resolve().parent / "sets"
 MARKER = ".mutation-overlay"
 ENV = {"PYTHONDONTWRITEBYTECODE": "1", "PATH": "/usr/bin:/bin"}
-SET_ORDER = ("step2", "step3", "step4", "step5", "step6", "step6b", "step7", "step8", "step10", "step11")
+SET_ORDER = ("step2", "step3", "step4", "step5", "step6", "step6b", "step7", "step8", "step10", "step11", "stageb2")
 # Uppmätt körtid i minuter (senaste körningarna); styr ordningen "längst först" i parallellt läge.
 MINUTES = {"step10": 41.1, "step6b": 38.5, "step6": 34.9, "step5": 27.9, "step7": 4.2, "step8": 3.9,
-           "step4": 3.5, "step3": 3.2, "step11": 3.0, "step2": 1.1}
+           "step4": 3.5, "step3": 3.2, "step11": 3.0, "step2": 1.1, "stageb2": 34.6}
 # docs/PHASE4_SPEC.md "MUTATION TESTS" -> mutationer som bevisar punkten (mängd, mutationsnamn).
 SPEC_MAP: dict[str, tuple[tuple[str, str], ...]] = {
     "skipped SHA verification": (("step2", "4 skip data file sha256 check"),

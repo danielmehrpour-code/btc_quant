@@ -29,6 +29,7 @@ and ask the owner; never choose yourself.
 - Copy into the repo only byte-identical, approved files.
 - No commit, tag, push or reset without explicit approval.
 - Mutation harnesses live in `scripts/mutation/` (from Phase 4 Step 11); run results stay outside the repo.
+- Reports, code comments and docstrings are written in Swedish or English, never in German.
 
 ## Decision recording (G-11, G-13)
 - Every new decision goes into `docs/DECISIONS.md` in the same commit as its code
@@ -44,6 +45,7 @@ and ask the owner; never choose yourself.
 - Phase 1-3 files and committed Phase 4 steps: additions only, or justify the change and show
   the exact diff before touching them.
 - The Phase 2/3 stores under `~/btc_data` stay read-only forever; `~/btc_data/datastore_v1` is written only through the committed CLI or library with `--apply` after owner approval.
+- `~/btc_data/binance_archive_v1` is written only by `scripts/data/fetch_binance.py` with `--apply` (SB-S2-a); never by hand.
 - Never adjust locked thresholds or splits after seeing real data (P1-04, P3-01, P3-02).
 - `phase*-verified` tags are never moved or deleted.
 - Backtests and research read through a snapshot (`PinnedStore`), never `read_current` (P4-S3-D4).
