@@ -168,7 +168,11 @@ def test_r7_invalid_timeframe_and_symbol_rejected(tmp_path):
 
 def test_r7_data_split_parsed_and_validated(tmp_path):
     s = load_settings(ROOT / "configs" / "default.yaml")
-    assert (s.data_split.train, s.data_split.validation, s.data_split.final_test) == (None, None, None)  # platshållare
+    assert [(seg.start.isoformat(), seg.end.isoformat())
+            for seg in (s.data_split.train, s.data_split.validation, s.data_split.final_test)] == [
+        ("2020-01-01T00:00:00+00:00", "2024-01-01T00:00:00+00:00"),
+        ("2024-01-08T00:00:00+00:00", "2025-07-01T00:00:00+00:00"),
+        ("2025-07-08T00:00:00+00:00", "2026-10-01T00:00:00+00:00")]                     # låst, D-B-h
     good = ("data_split: {train: {start: '2021-01-01T00:00:00Z', end: '2022-01-01T00:00:00Z'}, "
             "validation: {start: '2022-01-08T00:00:00Z', end: '2023-01-01T00:00:00Z'}, "
             "final_test: {start: '2023-01-08T00:00:00Z', end: '2024-01-01T00:00:00Z'}}\n")

@@ -474,6 +474,16 @@ step 3a). Verbatim: `~/phase4_work/STAGEB_DBH_APPROVAL.md`, `~/phase4_work/STAGE
 | SB-S3-BASE | B.3a | New baselines (G-08): ruff 40 (one UP017 disappeared with a replaced line of `tests/test_review_regressions.py`), mypy 25 (two errors in the replaced `DataSplitConfig` code disappeared); no new finding. | Verification commands compare against the last baseline. | owner decision 2026-10-08 |
 | SB-S4-NOTE1 | B.4 (design) | During the format check of the funding files (stage B step 4 design), a notation listing incidentally printed the number of negative values of `last_funding_rate`. The figure was not used and affects neither the data split nor any hypothesis. | Recorded openly: everything seen before the registry is locked is on record. | owner decision 2026-10-08 |
 
+## Roadmap stage B Step 3b: the data split is locked (P1-05)
+
+Owner decision of 2026-10-07 (D-B-h), interpretation confirmed 2026-10-07 (answer 2), lock commit approved
+2026-10-08. Verbatim: `~/phase4_work/STAGEB_DBH_APPROVAL.md`, `~/phase4_work/STAGEB_STEP3_APPROVAL.md`. This
+commit contains only the dates (`configs/default.yaml`), the test lines that pin them and this entry.
+
+| ID | Phase/step | Decision | Rationale | Source |
+|---|---|---|---|---|
+| D-B-h | B.3b | The data split is locked: TRAIN [2020-01-01T00:00Z, 2024-01-01T00:00Z), VALIDATION [2024-01-08T00:00Z, 2025-07-01T00:00Z), FINAL TEST [2025-07-08T00:00Z, 2026-10-01T00:00Z), exclusive UTC bounds on `open_time`; the 7-day gaps 2024-01-01 to 2024-01-07 and 2025-07-01 to 2025-07-07 are a minimum embargo and never change. No data before 2020-01-01 is part of the first package; older data is never added to improve a later result and never changes this split. FINAL TEST is strictly out of sample: it is never used for hypothesis selection, parameter optimisation, strategy development, feature selection, model selection, threshold or risk-parameter adjustment, or any analysis that leads to a change of a strategy; a change caused by a FINAL TEST result is new research that must be validated on new, untouched data; FINAL TEST is never reused as development data. The split never changes; a hypothesis that later needs a longer horizon than pre-registered fails or becomes a new hypothesis. | Locked before any feature or strategy result exists (P1-05, master spec 1.2 item 1); FINAL TEST is the most recent complete period (`docs/ROADMAP.md` gate 1). | owner decision 2026-10-07 (D-B-h sections 1, 2, 6; answer 2) |
+
 ## UNCERTAIN (for the owner to decide; not decisions)
 
 Two open: U-08 and U-09 (below). U-01 to U-07 were resolved by the owner on 2026-09-30:

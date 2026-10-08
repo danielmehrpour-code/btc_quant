@@ -21,7 +21,7 @@ trading:
 data_split:
   # Exklusiva gränser i UTC, [start, end) på open_time; en bar hör till den del där open_time ligger.
   # Minst 7 dagars lucka mellan delarna. FINAL TEST får ej röras vid optimering.
-  # PLATSHÅLLARE (P1-04/P1-05): inga datum ännu (null). Datumen låses i en egen commit (etapp B steg 3b).
-  train: null        # PLATSHÅLLARE -> {start: "...Z", end: "...Z"}
-  validation: null   # PLATSHÅLLARE
-  final_test: null   # PLATSHÅLLARE
+  # LÅST (D-B-h, P1-05): ändras aldrig efter att data setts; FINAL TEST används en gång.
+  train: {start: "2020-01-01T00:00:00Z", end: "2024-01-01T00:00:00Z"}
+  validation: {start: "2024-01-08T00:00:00Z", end: "2025-07-01T00:00:00Z"}
+  final_test: {start: "2025-07-08T00:00:00Z", end: "2026-10-01T00:00:00Z"}
