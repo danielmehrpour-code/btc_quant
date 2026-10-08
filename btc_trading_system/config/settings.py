@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field, fields
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -70,21 +70,56 @@ class MarketConfig:
         Instrument(self.instrument)          # ValueError om ej spot/perp
 
 
+SPLIT_SEGMENTS = ("train", "validation", "final_test")
+MIN_SPLIT_GAP = timedelta(days=7)            # minsta lucka (embargo) mellan två delar (D-B-h punkt 2)
+
+
 @dataclass(frozen=True)
-class DataSplitConfig:
-    """Exklusiva gränser: TRAIN = [start, train_until), VALIDATION = [train_until,
-    validation_until), FINAL TEST = [validation_until, ...). Tidszon måste anges (UTC)."""
-    train_until: datetime | None = None
-    validation_until: datetime | None = None
+class SplitSegment:
+    """En del av datauppdelningen: exklusiva UTC-gränser [start, end) på open_time."""
+    start: datetime
+    end: datetime
 
     def __post_init__(self) -> None:
-        if (self.train_until is None) != (self.validation_until is None):
-            raise ConfigError("data_split: ange både train_until och validation_until")
-        if self.train_until is not None:
-            require_utc(self.train_until, "data_split.train_until")
-            require_utc(self.validation_until, "data_split.validation_until")
-            if not self.train_until < self.validation_until:
-                raise ConfigError("data_split: train_until måste vara före validation_until")
+        require_utc(self.start, "data_split.start")
+        require_utc(self.end, "data_split.end")
+        if not self.start < self.end:
+            raise ConfigError(f"data_split: start {self.start.isoformat()} måste vara före end {self.end.isoformat()}")
+
+    def contains(self, open_time: datetime) -> bool:
+        return self.start <= open_time < self.end
+
+
+@dataclass(frozen=True)
+class DataSplitConfig:
+    """TRAIN, VALIDATION och FINAL TEST som SplitSegment, i den ordningen, utan överlappning och med
+    minst MIN_SPLIT_GAP mellan en del och nästa (nästa start - föregående end). En bar hör till den del
+    där dess open_time ligger; i en lucka eller utanför hör den till ingen. Alla tre eller ingen (inga
+    datum = platshållare, P1-04/P1-05)."""
+    train: SplitSegment | None = None
+    validation: SplitSegment | None = None
+    final_test: SplitSegment | None = None
+
+    def __post_init__(self) -> None:
+        segs = [self.train, self.validation, self.final_test]
+        if any(s is None for s in segs) and any(s is not None for s in segs):
+            raise ConfigError("data_split: ange alla tre delarna (train, validation, final_test) eller ingen")
+        for (a_name, a), (b_name, b) in zip(zip(SPLIT_SEGMENTS, segs), zip(SPLIT_SEGMENTS[1:], segs[1:])):
+            if a is None or b is None:
+                continue
+            if b.start < a.end:
+                raise ConfigError(f"data_split: {b_name} börjar före slutet av {a_name} (ordning/överlappning)")
+            if b.start - a.end < MIN_SPLIT_GAP:
+                raise ConfigError(f"data_split: luckan mellan {a_name} och {b_name} är kortare än {MIN_SPLIT_GAP.days} dagar")
+
+    def segment_of(self, open_time: datetime) -> str | None:
+        """Delens namn för en bar med denna open_time; None i en lucka, utanför eller utan datum."""
+        require_utc(open_time, "open_time")
+        for name in SPLIT_SEGMENTS:
+            seg = getattr(self, name)
+            if seg is not None and seg.contains(open_time):
+                return name
+        return None
 
 
 @dataclass(frozen=True)
@@ -138,6 +173,27 @@ def _parse_dt(v: Any, name: str) -> datetime:
     return require_utc(dt, name)
 
 
+def _parse_split(ds: Any) -> DataSplitConfig:
+    """data_split: {train, validation, final_test}, var och en null (platshållare) eller {start, end}."""
+    if ds is None:
+        return DataSplitConfig()
+    if not isinstance(ds, dict):
+        raise ConfigError("data_split måste vara en mapping")
+    if set(ds) != set(SPLIT_SEGMENTS):
+        raise ConfigError(f"data_split måste ha exakt nycklarna {list(SPLIT_SEGMENTS)}, fick {sorted(ds)}")
+    segs: dict[str, SplitSegment | None] = {}
+    for name in SPLIT_SEGMENTS:
+        v = ds[name]
+        if v is None:
+            segs[name] = None
+            continue
+        if not isinstance(v, dict) or set(v) != {"start", "end"}:
+            raise ConfigError(f"data_split.{name} måste vara null eller {{start, end}}, fick {v!r}")
+        segs[name] = SplitSegment(_parse_dt(v["start"], f"data_split.{name}.start"),
+                                  _parse_dt(v["end"], f"data_split.{name}.end"))
+    return DataSplitConfig(**segs)
+
+
 def load_settings(path: str | Path) -> Settings:
     raw = yaml.safe_load(Path(path).read_text()) or {}
     unknown = set(raw) - _TOP_LEVEL
@@ -146,13 +202,7 @@ def load_settings(path: str | Path) -> Settings:
     tf = raw.get("timeframe") or {}
     if set(tf) - {"primary"}:
         raise ConfigError(f"okända nycklar i timeframe: {sorted(set(tf) - {'primary'})}")
-    ds = raw.get("data_split") or {}
-    if set(ds) - {"train_until", "validation_until"}:
-        raise ConfigError(f"okända nycklar i data_split: {sorted(set(ds) - {'train_until', 'validation_until'})}")
-    split = DataSplitConfig(
-        train_until=_parse_dt(ds["train_until"], "data_split.train_until") if "train_until" in ds else None,
-        validation_until=_parse_dt(ds["validation_until"], "data_split.validation_until") if "validation_until" in ds else None,
-    )
+    split = _parse_split(raw.get("data_split"))
     return Settings(
         **{name: _section(raw, name, cls) for name, cls in _SECTIONS.items()},
         data_split=split,

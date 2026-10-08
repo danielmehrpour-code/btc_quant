@@ -19,8 +19,9 @@ trading:
   live: false
   paper: false
 data_split:
-  # Exklusiva gränser i UTC. PLATSHÅLLARE tills faktisk datalängd är känd.
-  # TRAIN = [start, train_until)   VALIDATION = [train_until, validation_until)
-  # FINAL TEST = [validation_until, slut)  -> får ej röras vid optimering
-  train_until: "2023-01-01T00:00:00Z"
-  validation_until: "2024-01-01T00:00:00Z"
+  # Exklusiva gränser i UTC, [start, end) på open_time; en bar hör till den del där open_time ligger.
+  # Minst 7 dagars lucka mellan delarna. FINAL TEST får ej röras vid optimering.
+  # PLATSHÅLLARE (P1-04/P1-05): inga datum ännu (null). Datumen låses i en egen commit (etapp B steg 3b).
+  train: null        # PLATSHÅLLARE -> {start: "...Z", end: "...Z"}
+  validation: null   # PLATSHÅLLARE
+  final_test: null   # PLATSHÅLLARE

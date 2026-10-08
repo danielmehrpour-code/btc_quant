@@ -449,6 +449,31 @@ Design approved by the owner on 2026-10-07 (SB-S2-a to SB-S2-j as proposed). Ver
 | SB-S2-IMPL12 | B.2 | `tests/test_fetch_binance.py` (58 tests) adds about 2.5-3 minutes to the full suite: every fake download performs the real fsyncs. The tests check the "not inside the repository" rule against a stand-in repository (a pytest fixture), so they do not depend on where pytest puts `tmp_path`; the real repository has its own test. | Faithful write path in every test; found when the mutation runner's in-overlay `--basetemp` turned the baseline red. | owner decision 2026-10-08 (choice 11) |
 | SB-S2-LANG | All | Reports, code comments and docstrings are written in Swedish or English, never in German (`CLAUDE.md`, working process). | Owner instruction. | owner decision 2026-10-08 |
 
+## Roadmap stage B Step 3a: data-split schema (no dates)
+
+Owner decisions of 2026-10-07 (D-B-h answers 1 and 2) and 2026-10-08 (unattended instruction, part 2; approval of
+step 3a). Verbatim: `~/phase4_work/STAGEB_DBH_APPROVAL.md`, `~/phase4_work/STAGEB_UNATTENDED_2026-10-08.md`,
+`~/phase4_work/STAGEB_STEP3_APPROVAL.md`. Work:
+`~/phase4_work/scratch/stageB/step3/`.
+
+| ID | Phase/step | Decision | Rationale | Source |
+|---|---|---|---|---|
+| D-B-h-1 | B.3a | The split is changed in two commits: first the `DataSplitConfig` schema (start and end of TRAIN, VALIDATION and FINAL TEST) with tests and placeholders, without dates; then the lock commit with only the dates (P1-05). | The lock commit must contain nothing but the locked values. | owner decision 2026-10-07 (D-B-h answer 1) |
+| D-B-h-2 | B.3a | Bounds are exclusive UTC bounds `[start, end)`; a bar belongs to the segment in which its `open_time` lies; the segments are in order without overlap, with a gap of at least 7 calendar days (`next.start - previous.end >= 7 days`). | P1-03 plus the D-B-h embargo. | owner decision 2026-10-07 (D-B-h answer 2) |
+| SB-S3-a | B.3a | Schema: `SplitSegment(start, end)` with `contains(open_time)`; `DataSplitConfig(train, validation, final_test)`, all three or none; `segment_of(open_time)` gives the segment name or `None` (gap, outside, no dates); `MIN_SPLIT_GAP = 7 days`. YAML: `data_split: {train, validation, final_test}`, each `null` or `{start, end}` (ISO time with `Z`); exactly these keys. | One rule in one place; strict as the rest of the configuration (R7b). | owner decision 2026-10-08 |
+| SB-S3-b | B.3a | Placeholders are `null` for all three segments in `configs/default.yaml`, marked `PLATSHÅLLARE`; the default configuration then has no split. | No date of any kind before the lock commit (P1-04). | owner decision 2026-10-08 |
+| SB-S3-c | B.3a | Mutation set `stageb3` (12 mutations); G-20: `step11` re-run (`runner.py`), no other set depends on a changed file. | Each rule has a mutation a test kills. | owner decision 2026-10-08 |
+| SB-S3-IMPL1 | B.3a | The placeholders are `null` for all three segments: no split is defined until the lock commit. | No date of any kind before the lock (P1-04). | owner decision 2026-10-08 (choice 1) |
+| SB-S3-IMPL2 | B.3a | Each segment is written `{start, end}` with exactly these keys, and `data_split` has exactly `train`, `validation`, `final_test`; the old keys `train_until`/`validation_until` are refused. | Strict configuration (R7b); no silent compatibility. | owner decision 2026-10-08 (choice 2) |
+| SB-S3-IMPL3 | B.3a | Bounds in the configuration have microsecond resolution (Python `datetime`); the ±1 ns boundary cases are tested on `open_time` as `pd.Timestamp`. | `datetime` cannot express nanoseconds; `open_time` is nanosecond-resolution. | owner decision 2026-10-08 (choice 3) |
+| SB-S3-IMPL4 | B.3a | The gap is measured as `next.start - previous.end`; exactly 7 days is allowed. | Matches the D-B-h dates (7 calendar days between the exclusive bounds). | owner decision 2026-10-08 (choice 4) |
+| SB-S3-IMPL5 | B.3a | `segment_of` requires a UTC time (`require_utc`). | Same rule as every other time in the system. | owner decision 2026-10-08 (choice 5) |
+| SB-S3-IMPL6 | B.3a | `tests/test_data_split.py` imports the private `_parse_split`. | Tests the parser directly besides `load_settings`. | owner decision 2026-10-08 (choice 6) |
+| SB-S3-IMPL7 | B.3a | `MINUTES["stageb3"]` is 0.2 (measured); `runner.py` changes on exactly two lines; `step11` re-run on the final run tree (6/6). | `MINUTES` holds measured durations; G-20. | owner decision 2026-10-08 (choice 7) |
+| SB-S3-IMPL8 | B.3a → 3b | The lock commit 3b changes two files: `configs/default.yaml` (the comment line and the three segment lines) and `tests/test_review_regressions.py` (the placeholder assertion becomes the assertion that pins the locked dates). | A locked value is pinned by a test (as P3-01). | owner decision 2026-10-08 (choice 8) |
+| SB-S3-BASE | B.3a | New baselines (G-08): ruff 40 (one UP017 disappeared with a replaced line of `tests/test_review_regressions.py`), mypy 25 (two errors in the replaced `DataSplitConfig` code disappeared); no new finding. | Verification commands compare against the last baseline. | owner decision 2026-10-08 |
+| SB-S4-NOTE1 | B.4 (design) | During the format check of the funding files (stage B step 4 design), a notation listing incidentally printed the number of negative values of `last_funding_rate`. The figure was not used and affects neither the data split nor any hypothesis. | Recorded openly: everything seen before the registry is locked is on record. | owner decision 2026-10-08 |
+
 ## UNCERTAIN (for the owner to decide; not decisions)
 
 Two open: U-08 and U-09 (below). U-01 to U-07 were resolved by the owner on 2026-09-30:

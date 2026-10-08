@@ -168,14 +168,19 @@ def test_r7_invalid_timeframe_and_symbol_rejected(tmp_path):
 
 def test_r7_data_split_parsed_and_validated(tmp_path):
     s = load_settings(ROOT / "configs" / "default.yaml")
-    assert s.data_split.train_until == datetime(2023, 1, 1, tzinfo=timezone.utc)
-    assert s.data_split.validation_until == datetime(2024, 1, 1, tzinfo=timezone.utc)
+    assert (s.data_split.train, s.data_split.validation, s.data_split.final_test) == (None, None, None)  # platshållare
+    good = ("data_split: {train: {start: '2021-01-01T00:00:00Z', end: '2022-01-01T00:00:00Z'}, "
+            "validation: {start: '2022-01-08T00:00:00Z', end: '2023-01-01T00:00:00Z'}, "
+            "final_test: {start: '2023-01-08T00:00:00Z', end: '2024-01-01T00:00:00Z'}}\n")
+    assert load_settings(_yaml(tmp_path, good)).data_split.validation.start == datetime(2022, 1, 8, tzinfo=timezone.utc)
     bad = [
-        "data_split: {train_until: 2023-01-01, validation_until: 2024-01-01}\n",               # YAML-datum: tvetydigt
-        "data_split: {train_until: '2023-01-01T00:00:00', validation_until: '2024-01-01T00:00:00Z'}\n",  # naiv
-        "data_split: {train_until: '2024-01-01T00:00:00Z', validation_until: '2023-01-01T00:00:00Z'}\n",  # fel ordning
-        "data_split: {train_until: '2023-01-01T00:00:00Z'}\n",                                  # bara ena
-        "data_split: {train_until: '2023-01-01T00:00:00+02:00', validation_until: '2024-01-01T00:00:00Z'}\n",
+        good.replace("'2021-01-01T00:00:00Z'", "2021-01-01"),                                    # YAML-datum: tvetydigt
+        good.replace("2021-01-01T00:00:00Z", "2021-01-01T00:00:00"),                              # naiv
+        good.replace("2021-01-01T00:00:00Z", "2022-02-01T00:00:00Z"),                             # start efter end
+        good.replace("2022-01-08T00:00:00Z", "2022-01-07T23:59:59Z"),                             # lucka < 7 dagar
+        good.replace("2021-01-01T00:00:00Z", "2021-01-01T00:00:00+02:00"),                        # inte UTC
+        "data_split: {train: null, validation: null}\n",                                         # en del saknas
+        good.replace("final_test: {start: '2023-01-08T00:00:00Z', end: '2024-01-01T00:00:00Z'}", "final_test: null"),
     ]
     for text in bad:
         with pytest.raises((ConfigError, ValueError)):
