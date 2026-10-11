@@ -112,7 +112,7 @@ def test_public_api_is_pinned():
         "(self, key: 'DatasetKey', start: 'datetime', end: 'datetime', *, "
         "as_of: 'datetime | None' = None) -> 'tuple[pd.DataFrame, dict[str, Any]]'")
     assert not hasattr(vs.VersionedStore, "read_current_range")                    # D-S7-b
-    assert [n for n in dir(vs.VersionedStore) if "range" in n] == ["read_range"]
+    assert [n for n in dir(vs.VersionedStore) if "range" in n] == ["read_funding_range", "read_range"]  # SB-S4-a
 
 
 # ================================================================== exhaustiv ekvivalens

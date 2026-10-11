@@ -88,17 +88,19 @@ def full(tmp_path):
 REQUIRED_TABLES = {"datasets", "dataset_versions", "version_sources", "refs", "ref_log",
                    "ingest_events", "ingest_sources", "snapshots", "snapshot_members",
                    "quality_reports", "quality_report_datasets"}
+FUNDING_TABLES = {"funding_datasets", "funding_versions", "funding_version_sources",
+                  "snapshot_funding_members"}                   # migration 2 (etapp B steg 4)
 
 
 def test_new_catalog_has_required_strict_tables_and_version(tmp_path):
     conn = _new(tmp_path)
     tables = {r[1]: r[5] for r in conn.execute("PRAGMA table_list")
               if r[2] == "table" and not r[1].startswith("sqlite_")}
-    assert set(tables) == REQUIRED_TABLES | {"schema_migrations"}
+    assert set(tables) == REQUIRED_TABLES | FUNDING_TABLES | {"schema_migrations"}
     assert all(strict == 1 for strict in tables.values())
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == cat.CATALOG_SCHEMA_VERSION == 1
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == cat.CATALOG_SCHEMA_VERSION == 2
     assert conn.execute("SELECT version, name, sql_sha256 FROM schema_migrations").fetchall() == \
-        [(1, "initial_catalog", cat.MIGRATIONS[0].sha256)]
+        [(1, "initial_catalog", cat.MIGRATIONS[0].sha256), (2, "funding_datasets", cat.MIGRATIONS[1].sha256)]
     assert cat.check_catalog(conn, full=True) == []
 
 
@@ -106,6 +108,8 @@ def test_migration_sql_is_frozen():
     """Migrering 1 får aldrig ändras i efterhand: ny ändring = ny migrering."""
     assert cat.MIGRATIONS[0].sha256 == \
         "a277d5b0e51813a0faca66cdf388d611bee19e1c8b5f01694685ef0aa9d9e1a6"
+    assert cat.MIGRATIONS[1].sha256 == \
+        "b3d2e5d65ff5d0fd5fb1a6f6a279915d4f0f3932e384e7e4e31f4db845d990d0"     # migration 2, fryst (SB-S4-a)
     assert [m.version for m in cat.MIGRATIONS] == list(range(1, len(cat.MIGRATIONS) + 1))
     assert cat.CATALOG_SCHEMA_VERSION == len(cat.MIGRATIONS)
 
@@ -140,10 +144,12 @@ def test_v0_empty_catalog_is_migrated_and_readonly_refuses(tmp_path):
     raw = _raw(path)
     raw.execute("VACUUM")                                # giltig tom databas, user_version 0
     raw.close()
-    with pytest.raises(cat.CatalogVersionError, match="kräver migrering"):
-        cat.open_catalog(path, readonly=True)
+    for ro in (True, False):                             # aldrig automatisk migrering (SB-S4-MIG)
+        with pytest.raises(cat.CatalogMigrationRequiredError, match="kräver migrering"):
+            cat.open_catalog(path, readonly=ro)
+    cat.migrate_catalog(path, apply=True)
     conn = cat.open_catalog(path)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
     assert cat.check_catalog(conn, full=True) == []
 
 
@@ -151,13 +157,13 @@ def test_newer_schema_version_is_rejected(tmp_path):
     path = tmp_path / "catalog.sqlite"
     _new(tmp_path).close()
     raw = _raw(path)
-    raw.execute("PRAGMA user_version = 2")
+    raw.execute("PRAGMA user_version = 3")
     raw.close()
     for ro in (False, True):
         with pytest.raises(cat.CatalogVersionError, match="nyare"):
             cat.open_catalog(path, readonly=ro)
     raw = _raw(path)
-    assert raw.execute("PRAGMA user_version").fetchone()[0] == 2    # orörd
+    assert raw.execute("PRAGMA user_version").fetchone()[0] == 3    # orörd
     raw.close()
 
 
@@ -165,25 +171,26 @@ def test_failing_migration_rolls_back_completely(tmp_path, monkeypatch):
     path = tmp_path / "catalog.sqlite"
     _new(tmp_path).close()
     before = cat.dump_catalog(cat.open_catalog(path, readonly=True))
-    bad = cat.Migration(2, "broken", "CREATE TABLE x (a INTEGER) STRICT;\nINSERT INTO nope VALUES (1);")
+    bad = cat.Migration(3, "broken", "CREATE TABLE x (a INTEGER) STRICT;\nINSERT INTO nope VALUES (1);")
     monkeypatch.setattr(cat, "MIGRATIONS", cat.MIGRATIONS + (bad,))
-    with pytest.raises(cat.CatalogMigrationError, match="migrering 2"):
-        cat.open_catalog(path)
+    with pytest.raises(cat.CatalogMigrationError, match="migrering 3"):
+        cat.migrate_catalog(path, apply=True)
     monkeypatch.undo()
     conn = cat.open_catalog(path, readonly=True)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
     assert cat.dump_catalog(conn) == before
 
 
 def test_successful_second_migration_is_applied_and_recorded(tmp_path, monkeypatch):
     path = tmp_path / "catalog.sqlite"
     _new(tmp_path).close()
-    m2 = cat.Migration(2, "add_x", "CREATE TABLE x (a INTEGER) STRICT;")
-    monkeypatch.setattr(cat, "MIGRATIONS", cat.MIGRATIONS + (m2,))
+    m3 = cat.Migration(3, "add_x", "CREATE TABLE x (a INTEGER) STRICT;")
+    monkeypatch.setattr(cat, "MIGRATIONS", cat.MIGRATIONS + (m3,))
+    cat.migrate_catalog(path, apply=True)                # explicit (SB-S4-MIG)
     conn = cat.open_catalog(path)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
-    assert conn.execute("SELECT version, sql_sha256 FROM schema_migrations WHERE version=2"
-                        ).fetchone() == (2, m2.sha256)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert conn.execute("SELECT version, sql_sha256 FROM schema_migrations WHERE version=3"
+                        ).fetchone() == (3, m3.sha256)
 
 
 # ------------------------------------------------------------------ säkerhet/korruption
@@ -572,7 +579,7 @@ def test_dump_is_independent_of_insertion_order(tmp_path):
         populate(b, reverse_rows=True)
     assert cat.dump_catalog(a) == cat.dump_catalog(b)
     lines = cat.dump_catalog(a).splitlines()
-    assert json.loads(lines[0])["catalog_schema_version"] == 1
+    assert json.loads(lines[0])["catalog_schema_version"] == 2
     assert sum(1 for ln in lines if ln.startswith('["datasets"')) == 2
 
 

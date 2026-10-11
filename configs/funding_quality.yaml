@@ -1,0 +1,6 @@
+# configs/funding_quality.yaml — LÅST (etapp B steg 4, SB-S4-d). Ändring kräver synligt beslut + uppdaterad hash i test.
+# Toleransen motiveras av Binances FAQ, inte av datan (P3-02): "There is a 15-second deviation in the actual
+# funding fee transaction time." Två avräkningar kan då avvika 15 s var åt motsatta håll: 2 x 15 s = 30 s.
+version: 1
+coverage:
+  spacing_tolerance_ms: 30000

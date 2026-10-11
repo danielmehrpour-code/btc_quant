@@ -570,10 +570,12 @@ def test_api_has_no_mutating_operations_and_reads_are_copies(store):
     assert again.loc[0, "close"] > 0 and man2["rows"] == 30
     assert {n for n in dir(vs.StoreWriter) if not n.startswith("_")} == \
         {"publish_version", "set_current", "complete_pending_ref_updates", "create_snapshot",
-         "snapshot_current", "ingest", "complete_pending_ingest"}
+         "snapshot_current", "ingest", "complete_pending_ingest", "publish_funding"}
     assert {n for n in dir(vs.VersionedStore) if not n.startswith("_")} == \
         {"init", "object_dir", "has_version", "verify_version", "read_version", "read_range", "writer",
-         "current_ref", "read_current", "read_snapshot", "pinned", "read_ingest", "ingest_history"}
+         "current_ref", "read_current", "read_snapshot", "pinned", "read_ingest", "ingest_history",
+         "funding_object_dir", "has_funding_version", "verify_funding_version", "read_funding_version",
+         "read_funding_range", "migrate_catalog"}                                   # etapp B steg 4
 
 
 # ================================================================== publiceringsordning / crash

@@ -53,6 +53,16 @@ ingenting ändras. Ombyggnaden använder steg 5-mekanismen (_rebuild_catalog: ho
 tillbaka, bygge i tmp/, atomisk ersättning), sedan verify igen. Resultatet bär katalogdumpens
 sha256 före och efter och om de är identiska (deterministisk dump/rebuild). Rebuild rör aldrig
 tmp/-rester (bara sin egen staging) och inget annat än catalog.sqlite.
+
+FUNDING (etapp B steg 4, SB-S4-a A2): objects/binance/perp/<SYMBOL>/funding/<data_version>/ verifieras
+fullt med lagrets _verify_funding_object; funding_datasets, funding_versions, funding_version_sources
+och snapshot_funding_members härleds från objekten och snapshotfilerna (v2) och jämförs som övriga
+tabeller. En funding-version refereras bara av snapshots.
+
+MIGRERING (SB-S4-MIG): en oskadad katalog med äldre schema ger CATALOG_MIGRATION_REQUIRED (PENDING,
+exit 2): den kräver ett explicit migrate_catalog och jämförs inte rad för rad innan dess. Repair och
+rebuild vägrar då med apply=True (RepairRefusedError), så att ingen ombyggnad migrerar katalogen i
+smyg; de bygger aldrig om en katalog vars schema bara är äldre.
 """
 from __future__ import annotations
 
@@ -69,6 +79,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from btc_trading_system.data import funding as fd
 from btc_trading_system.data.schema import DatasetKey
 from btc_trading_system.data_validation.errors import DataError
 from btc_trading_system.database import catalog
@@ -114,6 +125,7 @@ CODES: dict[str, str] = {
     "CATALOG_MISSING": "REPAIRABLE",
     "CATALOG_UNREADABLE": "REPAIRABLE",
     "CATALOG_NEWER_SCHEMA": "ERROR",
+    "CATALOG_MIGRATION_REQUIRED": "PENDING",
     "CATALOG_STRUCTURE": "REPAIRABLE",
     "CATALOG_BEHIND": "REPAIRABLE",
     "CATALOG_CONFLICT": "ERROR",
@@ -128,11 +140,15 @@ CATALOG_TABLES: tuple[tuple[str, tuple[str, ...], int], ...] = (
     ("datasets", ("dataset_id", "exchange", "instrument", "symbol", "timeframe"), 1),
     ("dataset_versions", vs._DV_COLUMNS, 2),
     ("version_sources", vs._VS_COLUMNS, 3),
+    ("funding_datasets", ("dataset_id", "exchange", "instrument", "symbol"), 1),
+    ("funding_versions", vs._FV_COLUMNS, 2),
+    ("funding_version_sources", vs._FVS_COLUMNS, 3),
     ("ref_log", ("seq", "entry_sha256", "prev_entry_sha256", "dataset_id", "data_version",
                  "previous_data_version", "action"), 1),
     ("refs", ("dataset_id", "data_version", "ref_log_seq", "ref_file_sha256"), 1),
     ("snapshots", ("snapshot_id", "snapshot_file_sha256", "member_count"), 1),
     ("snapshot_members", ("snapshot_id", "dataset_id", "data_version"), 2),
+    ("snapshot_funding_members", ("snapshot_id", "dataset_id", "data_version"), 2),
     ("ingest_events", ("seq", "ingest_id", "record_sha256", "dataset_id", "data_version",
                        "previous_data_version", "params_json", "code_version", "worktree_clean",
                        "publication", "ref_outcome", "ref_log_seq", "duplicates_dropped"), 1),
@@ -312,6 +328,7 @@ class _Verifier:
         self.counts: dict[str, int] = {}
         self.derived = _Derived({t: set() for t, _, _ in CATALOG_TABLES}, set(), {})
         self.valid_objects: dict[tuple[str, str], DatasetKey] = {}
+        self.valid_funding: dict[tuple[str, str], fd.FundingKey] = {}
         self.object_manifests: dict[tuple[str, str], dict[str, Any]] = {}
         self.object_dirs: set[tuple[str, str]] = set()         # alla med giltig layout
         self.referenced: set[tuple[str, str]] = set()
@@ -406,6 +423,9 @@ class _Verifier:
         self.done("objects.layout")
         for d, parts in candidates:
             subject = self.rel(d)
+            if parts[3] == fd.FUNDING_KIND:
+                self._check_funding_object(d, parts, subject)
+                continue
             try:
                 key = catalog.dataset_key(exchange=parts[0], instrument=parts[1], symbol=parts[2],
                                           timeframe=parts[3])
@@ -439,6 +459,34 @@ class _Verifier:
         self.counts["objects_valid"] = len(self.valid_objects)
         self.counts["objects_corrupt"] = len(self.derived.excluded_versions)
         self.counts["datasets"] = len(self.derived.rows["datasets"])
+        self.counts["funding_objects_valid"] = len(self.valid_funding)
+        self.counts["funding_datasets"] = len(self.derived.rows["funding_datasets"])
+
+    def _check_funding_object(self, d: Path, parts: tuple[str, ...], subject: str) -> None:
+        """objects/binance/perp/<SYMBOL>/funding/<dv> (SB-S4-a A2)."""
+        try:
+            key = catalog.funding_dataset_key(exchange=parts[0], instrument=parts[1], symbol=parts[2])
+        except ValueError as e:
+            self.add("OBJECT_LAYOUT", subject, f"ogiltig funding-nyckel: {e}")
+            return
+        dv = parts[4]
+        if not catalog.is_sha256_hex(dv):
+            self.add("OBJECT_LAYOUT", subject, "katalognamnet är inte en data_version")
+            return
+        did = catalog.funding_dataset_id(key)
+        self.object_dirs.add((did, dv))
+        self.derived.rows["funding_datasets"].add((did, key.exchange, key.instrument.value, key.symbol))
+        if stat.S_IMODE(os.lstat(d).st_mode) != vs.DIR_MODE:
+            self.add("OBJECT_DIR_MODE", subject, f"läge {stat.S_IMODE(os.lstat(d).st_mode):o} != {vs.DIR_MODE:o}")
+        try:
+            info, manifest, _ = self.store._verify_funding_object(key, dv)
+        except (DataError, OSError, ValueError) as e:
+            self.add("OBJECT_CORRUPT", subject, str(e))
+            self.derived.excluded_versions.add((did, dv))
+            return
+        self.valid_funding[(did, dv)] = key
+        self.derived.rows["funding_versions"].add(vs.funding_version_row(info, manifest))
+        self.derived.rows["funding_version_sources"].update(vs.funding_source_rows(info, manifest))
 
     def _walk_objects(self, d: Path, parts: tuple[str, ...],
                       out: list[tuple[Path, tuple[str, ...]]]) -> None:
@@ -574,6 +622,12 @@ class _Verifier:
                     if not self._object_exists(m.dataset_id, m.data_version):
                         self.add("SNAPSHOT_MEMBER_MISSING", subject,
                                  f"{m.key.relpath}/{m.data_version} saknas")
+                for f in snap.funding:                     # v2 (SB-S4-a A2)
+                    self.derived.rows["snapshot_funding_members"].add((sid, f.dataset_id, f.data_version))
+                    self.referenced.add((f.dataset_id, f.data_version))
+                    if not self._object_exists(f.dataset_id, f.data_version):
+                        self.add("SNAPSHOT_MEMBER_MISSING", subject,
+                                 f"{f.key.relpath}/{f.data_version} saknas")
         self.done("snapshots.files")
         self.done("snapshots.members")
         self.counts["snapshots"] = n
@@ -718,6 +772,9 @@ class _Verifier:
             if (did, dv) not in self.referenced:
                 self.add("OBJECT_UNREFERENCED", f"objects/{key.relpath}/{dv}",
                          "refereras inte av ref_log, refs, snapshots eller ingests")
+        for (did, dv), fkey in sorted(self.valid_funding.items()):
+            if (did, dv) not in self.referenced:
+                self.add("OBJECT_UNREFERENCED", f"objects/{fkey.relpath}/{dv}", "refereras inte av någon snapshot")
         self.done("objects.references")
 
     # ---- katalog
@@ -726,9 +783,11 @@ class _Verifier:
         conn = self._open_catalog(path)
         self.done("catalog.open")
         if conn is None:
-            self.skip("catalog.structure_full", "katalogen kan inte öppnas")
+            why = ("katalogen kräver migrering" if "CATALOG_MIGRATION_REQUIRED" in {f.code for f in self.findings}
+                   else "katalogen kan inte öppnas")
+            self.skip("catalog.structure_full", why)
             for t, _, _ in CATALOG_TABLES:
-                self.skip(f"catalog.rows.{t}", "katalogen kan inte öppnas")
+                self.skip(f"catalog.rows.{t}", why)
             return
         try:
             problems = catalog.check_catalog(conn, full=True)
@@ -762,6 +821,8 @@ class _Verifier:
             return None
         try:
             return catalog.open_catalog(path, readonly=True)
+        except catalog.CatalogMigrationRequiredError as e:   # oskadat, äldre schema (SB-S4-MIG)
+            self.add("CATALOG_MIGRATION_REQUIRED", vs.CATALOG_FILE, str(e))
         except catalog.CatalogVersionError as e:
             if self._catalog_version(path) > len(catalog.MIGRATIONS):
                 self.add("CATALOG_NEWER_SCHEMA", vs.CATALOG_FILE, str(e))
@@ -786,7 +847,7 @@ class _Verifier:
 
     def _compare(self, table: str, nkey: int, have: set[Row], want: set[Row]) -> None:
         excluded = self.derived.excluded_versions
-        if table in ("dataset_versions", "version_sources"):
+        if table in ("dataset_versions", "version_sources", "funding_versions", "funding_version_sources"):
             have = {r for r in have if (r[0], r[1]) not in excluded}
         have_k = {r[:nkey]: r for r in have}
         want_k = {r[:nkey]: r for r in want}
@@ -798,6 +859,9 @@ class _Verifier:
             if h is None and table == "dataset_versions":
                 key = self.valid_objects[(k[0], k[1])]
                 self.add("OBJECT_UNREGISTERED", f"objects/{key.relpath}/{k[1]}", "saknar katalograd")
+            elif h is None and table == "funding_versions":
+                fkey = self.valid_funding[(k[0], k[1])]
+                self.add("OBJECT_UNREGISTERED", f"objects/{fkey.relpath}/{k[1]}", "saknar katalograd")
             elif h is None:
                 self.add("CATALOG_BEHIND", subject, "raden saknas i katalogen")
             elif w is None:
@@ -905,6 +969,7 @@ def repair_store(root: str | Path, *, apply: bool = False) -> RepairResult:
         if plan.blocking:
             raise RepairRefusedError(
                 f"repair vägrar: {len(plan.blocking)} ERROR-fynd; ingenting ändrades", before)
+        _refuse_if_migration_required(before, "repair")
         if plan.rebuild_catalog:
             _rebuild_catalog(store, derived)
         for rel in plan.tmp_removals:
@@ -933,6 +998,7 @@ def rebuild_catalog_store(root: str | Path, *, apply: bool = False) -> RebuildRe
         if errors:
             raise RepairRefusedError(
                 f"rebuild vägrar: {len(errors)} ERROR-fynd; ingenting ändrades", report)
+        _refuse_if_migration_required(report, "rebuild")
         _rebuild_catalog(store, rows)
         rebuilt, _ = _verify(store, best_effort=False)
         return RebuildResult(report, errors, applied=True, after=rebuilt)
@@ -946,9 +1012,18 @@ def _rebuild_catalog(store: vs.VersionedStore, derived: _Derived) -> None:
     if journal.exists() and journal.stat().st_size > 0:
         try:                                                # SQLite rullar tillbaka avbruten skrivning
             catalog.open_catalog(path).close()
+        except catalog.CatalogMigrationRequiredError as e:  # efter rollback: bara äldre schema
+            raise vs.StoreError(f"{e}; ombyggnaden vägrar, kör migrate-catalog (SB-S4-MIG)") from e
         except (catalog.CatalogError, sqlite3.Error):
             pass                                            # katalogen ersätts ändå
     catalog.rebuild_catalog(path, _populate(derived), staging_dir=store.tmp)
+
+
+def _refuse_if_migration_required(report: VerifyReport, what: str) -> None:
+    """En katalog som bara har ett äldre schema byggs aldrig om (det vore en migrering i smyg)."""
+    if "CATALOG_MIGRATION_REQUIRED" in report.codes:
+        raise RepairRefusedError(f"{what} vägrar: katalogen kräver migrering (migrate-catalog); "
+                                 "ingenting ändrades", report)
 
 
 def _populate(derived: _Derived) -> Callable[[sqlite3.Connection], None]:

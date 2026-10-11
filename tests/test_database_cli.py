@@ -35,7 +35,7 @@ T = datetime(2031, 5, 6, 7, 8, 9, 123456, tzinfo=UTC)
 GIT = ("c0de" * 10, True)
 FAKE_HEAD = "1" * 40
 MUTATING = ("init", "import-legacy", "ingest", "set-current", "snapshot create", "register-report",
-            "repair", "rebuild", "complete-pending")
+            "repair", "rebuild", "complete-pending", "migrate-catalog", "ingest-funding")
 
 
 # ================================================================== hjälp
@@ -211,13 +211,17 @@ PIN = {
     "versions": {"--store": REQ, "--dataset": REQ},
     "set-current": {"--store": REQ, "--dataset": REQ, "--data-version": REQ, "--apply": False},
     "snapshot": {},
-    "snapshot create": {"--store": REQ, "--current": None, "--member": None, "--apply": False},
+    "snapshot create": {"--store": REQ, "--current": None, "--member": None, "--funding-member": [],
+                        "--apply": False},
     "snapshot show": {"--store": REQ, "--id": REQ},
     "register-report": {"--store": REQ, "--source": REQ, "--apply": False},
     "verify": {"--store": REQ},
     "repair": {"--store": REQ, "--apply": False},
     "rebuild": {"--store": REQ, "--apply": False},
     "complete-pending": {"--store": REQ, "--kind": REQ, "--apply": False},
+    "migrate-catalog": {"--store": REQ, "--apply": False},
+    "ingest-funding": {"--store": REQ, "--dataset": REQ, "files": REQ, "--apply": False},
+    "funding-versions": {"--store": REQ, "--dataset": REQ},
 }
 
 
@@ -249,6 +253,9 @@ ARGV_NO_STORE = {
     "snapshot create": ["snapshot", "create", "--current", SPOT_D], "snapshot show": ["snapshot", "show", "--id", "a" * 64],
     "register-report": ["register-report", "--source", "x"], "verify": ["verify"], "repair": ["repair"],
     "rebuild": ["rebuild"], "complete-pending": ["complete-pending", "--kind", "ingest"],
+    "migrate-catalog": ["migrate-catalog"],
+    "ingest-funding": ["ingest-funding", "--dataset", "binance/perp/BTCUSDT/funding", "f.zip"],
+    "funding-versions": ["funding-versions", "--dataset", "binance/perp/BTCUSDT/funding"],
 }
 
 

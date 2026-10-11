@@ -146,6 +146,21 @@ INTERVALLÄSNING (steg 7)
   Varje anrop verifierar hela objektet (read_version/_verify_object) innan utsnittet tas: ingen
   cache, inga delläsningar. read_current har ingen intervallvariant (P4-S3-D4). Intervall-
   läsningarna kopplas inte in i LocalOHLCVProvider.
+
+FUNDING (etapp B steg 4, SB-S4-a A2)
+  <root>/objects/binance/perp/<SYMBOL>/funding/<data_version>/
+      funding.parquet           kanonisk funding-ram (data/funding.py)
+      manifest.json             kanonisk JSON: nyckel, rader, första/sista calc_time, data_version,
+                                källfilerna (namn, sha256, rader) och borttagna dubbletter
+      version.json              objektmetadata: dataset_id (funding-domänen) + hashar
+  Samma oföränderlighet och publiceringsordning som OHLCV-objekten (staging i tmp/, 0444/0555,
+  fsync, atomisk rename, verifiering från disk, katalograd sist i EN transaktion:
+  funding_datasets, funding_versions, funding_version_sources). Samma data_version med andra
+  källor -> ProvenanceConflictError (strikt, som publish_version). Inga refs, ingen ref_log och
+  inga ingest-poster för funding: en funding-version pinnas bara i en snapshot (format v2,
+  refs.py) och läses via PinnedStore. Kausalitet: as_of=t exponerar ENDAST rader med
+  available_at = calc_time + 15 s <= t (data/funding.py, SB-S4-c); intervall [start, end) på
+  calc_time med samma indatakontroller som read_range.
 """
 from __future__ import annotations
 
@@ -170,6 +185,7 @@ from typing import Any, Literal
 import pandas as pd
 
 from btc_trading_system.core.types import TIMEFRAMES, require_utc
+from btc_trading_system.data import funding as fd
 from btc_trading_system.data import schema as p2_schema
 from btc_trading_system.data.ingest import ingest_dataset
 from btc_trading_system.data.schema import DatasetKey
@@ -196,6 +212,7 @@ from btc_trading_system.database.lineage import (
 from btc_trading_system.database.refs import (
     DatasetVersionRef,
     DataSnapshot,
+    FundingVersionRef,
     compact_json_bytes,
 )
 
@@ -233,6 +250,18 @@ _REF_LOG_KEYS = frozenset({"seq", "prev_entry_sha256", "dataset", "dataset_id", 
 _REF_FILE_KEYS = frozenset({"format", "dataset", "dataset_id", "data_version", "ref_log_seq",
                             "ref_log_entry_sha256"})
 INGESTS_DIR = "ingests"
+FUNDING_DATA_FILE = "funding.parquet"
+FUNDING_OBJECT_FILES = frozenset({FUNDING_DATA_FILE, MANIFEST_FILE, VERSION_FILE})
+FUNDING_VERSION_FORMAT = "btc-quant/funding-version/v1"
+_FUNDING_VERSION_KEYS = frozenset({"format", "dataset_id", "dataset", "data_version", "data_file",
+                                   "manifest", "rows", "first_calc_time", "last_calc_time"})
+_FUNDING_MANIFEST_KEYS = frozenset({"schema_version", "kind", "exchange", "instrument", "symbol", "rows",
+                                    "first_calc_time", "last_calc_time", "data_version", "sources",
+                                    "duplicates_dropped"})
+_FV_COLUMNS = ("dataset_id", "data_version", "data_file_sha256", "data_file_bytes", "manifest_sha256",
+               "version_sha256", "manifest_schema_version", "rows", "first_calc_time_ms",
+               "last_calc_time_ms", "duplicates_dropped")
+_FVS_COLUMNS = ("dataset_id", "data_version", "source_index", "name", "sha256", "rows")
 
 
 class StoreError(DataError):
@@ -359,6 +388,28 @@ class PublishResult:
         return self.outcome == "published"
 
 
+@dataclass(frozen=True)
+class FundingVersionInfo:
+    key: fd.FundingKey
+    dataset_id: str
+    data_version: str
+    data_file_sha256: str
+    data_file_bytes: int
+    manifest_sha256: str
+    manifest_bytes: int
+    version_sha256: str
+    rows: int
+    first_calc_time: str
+    last_calc_time: str
+
+
+@dataclass(frozen=True)
+class FundingPublishResult:
+    info: FundingVersionInfo
+    outcome: Literal["published", "reused"]
+    duplicates_dropped: int
+
+
 # ------------------------------------------------------------------ hjälp (spionerbara i test)
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
@@ -444,6 +495,22 @@ def range_slice(frame: pd.DataFrame, timeframe: str, start: datetime, end: datet
     if as_of is not None:
         hi = min(hi, int(times.searchsorted(causal_cutoff(as_of, timeframe), side="right")))
     return frame.iloc[lo:max(lo, hi)].reset_index(drop=True)
+
+
+def funding_range_slice(frame: pd.DataFrame, start: datetime, end: datetime,
+                        as_of: datetime | None = None) -> pd.DataFrame:
+    """[start, end) på calc_time; as_of -> available_at = calc_time + 15 s <= as_of (SB-S4-c)."""
+    start_ts, end_ts = _check_range(start, end, as_of)
+    calc = frame["calc_time"]
+    first = int(calc.searchsorted(pd.Timestamp(start_ts), side="left"))
+    stop = int(calc.searchsorted(pd.Timestamp(end_ts), side="left"))
+    if as_of is not None:
+        stop = min(stop, int(calc.searchsorted(fd.funding_cutoff(as_of), side="right")))
+    return frame.iloc[first:max(first, stop)].reset_index(drop=True)
+
+
+def apply_funding_as_of(frame: pd.DataFrame, as_of: datetime) -> pd.DataFrame:
+    return frame.loc[frame["calc_time"] <= fd.funding_cutoff(as_of)].reset_index(drop=True)
 
 
 # ------------------------------------------------------------------ refs / ref_log (steg 3)
@@ -805,6 +872,122 @@ class VersionedStore:
             raise ObjectCorruptError(f"{where}: version.json är ogiltig eller tillhör annat objekt")
         return v
 
+    # -------------------------------------------------------------- funding: läsning (inget lås)
+    def funding_object_dir(self, key: fd.FundingKey, data_version: str) -> Path:
+        if not catalog.is_sha256_hex(data_version):
+            raise ValueError(f"ogiltig data_version: {data_version!r}")
+        catalog.funding_dataset_key_json(key)                # validerar exchange
+        return self.objects / key.relpath / data_version
+
+    def has_funding_version(self, key: fd.FundingKey, data_version: str) -> bool:
+        return os.path.lexists(self.funding_object_dir(key, data_version))
+
+    def verify_funding_version(self, key: fd.FundingKey, data_version: str) -> FundingVersionInfo:
+        return self._verify_funding_object(key, data_version)[0]
+
+    def read_funding_version(self, key: fd.FundingKey, data_version: str, *,
+                             as_of: datetime | None = None) -> tuple[pd.DataFrame, dict[str, Any]]:
+        """Exakt denna version, verifierad vid varje läsning; as_of -> available_at <= as_of."""
+        if as_of is not None:
+            require_utc(as_of, "as_of")
+        _, manifest, frame = self._verify_funding_object(key, data_version)
+        if as_of is not None:
+            frame = apply_funding_as_of(frame, as_of)
+        return frame, manifest
+
+    def read_funding_range(self, key: fd.FundingKey, data_version: str, start: datetime, end: datetime, *,
+                           as_of: datetime | None = None) -> tuple[pd.DataFrame, dict[str, Any]]:
+        """Exakt denna version, [start, end) på calc_time; indata kontrolleras före all fil-I/O."""
+        _check_range(start, end, as_of)
+        _, manifest, frame = self._verify_funding_object(key, data_version)
+        return funding_range_slice(frame, start, end, as_of), manifest
+
+    def _verify_funding_object(self, key: fd.FundingKey, dv: str
+                               ) -> tuple[FundingVersionInfo, dict[str, Any], pd.DataFrame]:
+        d = self.funding_object_dir(key, dv)
+        where = f"{key.relpath}/{dv}"
+        if not os.path.lexists(d):
+            raise DatasetNotFoundError(f"funding-version saknas: {where}")
+        if d.is_symlink() or not d.is_dir():
+            raise ObjectCorruptError(f"{where}: inte en katalog")
+        names = {p.name for p in d.iterdir()}
+        if names != FUNDING_OBJECT_FILES:
+            raise ObjectCorruptError(f"{where}: filer {sorted(names)} != {sorted(FUNDING_OBJECT_FILES)}")
+        for name in sorted(FUNDING_OBJECT_FILES):
+            path = d / name
+            if path.is_symlink() or not path.is_file():
+                raise ObjectCorruptError(f"{where}/{name}: inte en vanlig fil")
+            if os.lstat(path).st_mode & 0o222:
+                raise ObjectCorruptError(f"{where}/{name}: skrivbar (oföränderliga filer ska vara 0444)")
+        vbytes = (d / VERSION_FILE).read_bytes()
+        version = self._parse_funding_version(vbytes, key, dv, where)
+        mbytes = (d / MANIFEST_FILE).read_bytes()
+        if hashlib.sha256(mbytes).hexdigest() != version["manifest"]["sha256"] \
+                or len(mbytes) != version["manifest"]["bytes"]:
+            raise ObjectCorruptError(f"{where}: manifest_sha256 matchar inte version.json")
+        try:
+            manifest = json.loads(mbytes)
+        except ValueError as e:
+            raise ObjectCorruptError(f"{where}: manifest är inte JSON") from e
+        expected = {"schema_version": fd.FUNDING_SCHEMA_VERSION, "kind": fd.FUNDING_KIND,
+                    "exchange": key.exchange, "instrument": key.instrument.value, "symbol": key.symbol,
+                    "data_version": dv, "rows": version["rows"], "first_calc_time": version["first_calc_time"],
+                    "last_calc_time": version["last_calc_time"]}
+        if not isinstance(manifest, dict) or set(manifest) != _FUNDING_MANIFEST_KEYS \
+                or canonical_json_bytes(manifest) != mbytes \
+                or any(manifest[k] != v for k, v in expected.items()) \
+                or not _is_int(manifest["duplicates_dropped"]) or manifest["duplicates_dropped"] < 0:
+            raise ObjectCorruptError(f"{where}: manifestet matchar inte objektet")
+        try:
+            sources = _parse_funding_sources(manifest["sources"])
+        except InvalidSourcesError as e:
+            raise ObjectCorruptError(f"{where}: {e}") from e
+        fpath = d / FUNDING_DATA_FILE
+        if sha256_file(fpath) != version["data_file"]["sha256"] \
+                or fpath.stat().st_size != version["data_file"]["bytes"]:
+            raise ObjectCorruptError(f"{where}: data_file_sha256 matchar inte version.json")
+        try:
+            frame = fd.canonicalize_funding(fd.FundingParquet.read(fpath))
+            fd.check_funding_frame(frame)
+        except Exception as e:                           # trasig Parquet eller ogiltig ram trots rätt hash
+            raise ObjectCorruptError(f"{where}: funding.parquet kan inte läsas eller valideras: {e}") from e
+        if fd.funding_content_hash(frame) != dv:
+            raise ObjectCorruptError(f"{where}: innehållet matchar inte data_version")
+        if len(frame) != version["rows"] \
+                or frame["calc_time"].iloc[0].isoformat() != version["first_calc_time"] \
+                or frame["calc_time"].iloc[-1].isoformat() != version["last_calc_time"] \
+                or sum(s["rows"] for s in sources) != len(frame) + manifest["duplicates_dropped"]:
+            raise ObjectCorruptError(f"{where}: rader/täckning matchar inte version.json och källorna")
+        info = FundingVersionInfo(
+            key=key, dataset_id=version["dataset_id"], data_version=dv,
+            data_file_sha256=version["data_file"]["sha256"], data_file_bytes=version["data_file"]["bytes"],
+            manifest_sha256=version["manifest"]["sha256"], manifest_bytes=version["manifest"]["bytes"],
+            version_sha256=hashlib.sha256(vbytes).hexdigest(), rows=version["rows"],
+            first_calc_time=version["first_calc_time"], last_calc_time=version["last_calc_time"])
+        return info, manifest, frame
+
+    @staticmethod
+    def _parse_funding_version(vbytes: bytes, key: fd.FundingKey, dv: str, where: str) -> dict[str, Any]:
+        try:
+            v = json.loads(vbytes)
+        except ValueError as e:
+            raise ObjectCorruptError(f"{where}: version.json är inte JSON") from e
+        ok = (isinstance(v, dict) and set(v) == _FUNDING_VERSION_KEYS
+              and canonical_json_bytes(v) == vbytes
+              and v["format"] == FUNDING_VERSION_FORMAT
+              and v["dataset_id"] == catalog.funding_dataset_id(key)
+              and v["dataset"] == json.loads(catalog.funding_dataset_key_json(key))
+              and v["data_version"] == dv
+              and _is_int(v["rows"]) and v["rows"] >= 1
+              and all(isinstance(v[k], dict) and set(v[k]) == {"path", "sha256", "bytes"}
+                      and catalog.is_sha256_hex(v[k]["sha256"])
+                      and _is_int(v[k]["bytes"]) and v[k]["bytes"] > 0
+                      for k in ("data_file", "manifest"))
+              and v["data_file"]["path"] == FUNDING_DATA_FILE and v["manifest"]["path"] == MANIFEST_FILE)
+        if not ok:
+            raise ObjectCorruptError(f"{where}: version.json är ogiltig eller tillhör annat objekt")
+        return v
+
     # -------------------------------------------------------------- refs / snapshots: läsning (inget lås)
     def _ref_path(self, key: DatasetKey) -> Path:
         catalog.dataset_key_json(key)                        # validerar exchange
@@ -1006,6 +1189,18 @@ class VersionedStore:
                 yield StoreWriter(self, conn, lock)
             finally:
                 conn.close()
+        finally:
+            lock.release()
+
+    def migrate_catalog(self, *, apply: bool = False) -> catalog.MigrationResult:
+        """Explicit katalogmigrering (SB-S4-MIG), dry-run som standard. apply=True under skrivarlåset;
+        objekt, refs och alla andra filer rörs aldrig, bara catalog.sqlite (och dess journal)."""
+        if not apply:
+            return catalog.migrate_catalog(self.catalog_path)
+        lock = _WriterLock(self.root / LOCK_FILE)
+        lock.acquire()
+        try:
+            return catalog.migrate_catalog(self.catalog_path, apply=True)
         finally:
             lock.release()
 
@@ -1283,21 +1478,29 @@ class StoreWriter:
                 raise catalog.CatalogCorruptError("katalogen har refs som saknas i filerna")
 
     # -------------------------------------------------------------- snapshots (steg 3)
-    def create_snapshot(self, members: DataSnapshot | list[DatasetVersionRef] | tuple[DatasetVersionRef, ...]
-                        ) -> SnapshotResult:
-        """Pinnar exakt dessa versioner (alla verifieras fullt). Samma medlemmar -> samma id."""
+    def create_snapshot(self, members: DataSnapshot | list[DatasetVersionRef] | tuple[DatasetVersionRef, ...],
+                        funding: tuple[FundingVersionRef, ...] = ()) -> SnapshotResult:
+        """Pinnar exakt dessa versioner (alla verifieras fullt). Samma medlemmar -> samma id.
+        funding (eller en DataSnapshot med funding) ger en snapshot v2 (refs.py)."""
         self._require_lock()
+        if isinstance(members, DataSnapshot) and funding:
+            raise ValueError("funding anges i DataSnapshot, inte separat")
         store = self._store
         if store._load_ref_state().pending is not None:
             raise PendingRefUpdateError("väntande ref-uppdatering; anropa complete_pending_ref_updates() först")
-        snap = members if isinstance(members, DataSnapshot) else DataSnapshot.of(members)
+        snap = members if isinstance(members, DataSnapshot) else DataSnapshot.of(members, funding)
         for m in snap.members:
             info, manifest, _ = store._verify_object(m.key, m.data_version)
             self._register(info, manifest)
+        for f in snap.funding:                           # v2: varje funding-version verifieras fullt
+            finfo, fmanifest, _ = store._verify_funding_object(f.key, f.data_version)
+            self._register_funding(finfo, fmanifest)
         return self._publish_snapshot(snap)
 
-    def snapshot_current(self, keys: list[DatasetKey] | tuple[DatasetKey, ...]) -> SnapshotResult:
-        """Pinnar datasetens AKTUELLA versioner nu; följer aldrig senare ref-ändringar."""
+    def snapshot_current(self, keys: list[DatasetKey] | tuple[DatasetKey, ...],
+                         funding: tuple[FundingVersionRef, ...] = ()) -> SnapshotResult:
+        """Pinnar datasetens AKTUELLA versioner nu; följer aldrig senare ref-ändringar.
+        Funding har inga refs: funding-versioner anges explicit (snapshot v2)."""
         self._require_lock()
         state = self._store._load_ref_state()
         if state.pending is not None:
@@ -1308,7 +1511,7 @@ class StoreWriter:
             if rf is None:
                 raise NoCurrentRefError(f"ingen aktuell ref för {key.relpath}")
             members.append(rf.ref)
-        return self.create_snapshot(members)
+        return self.create_snapshot(members, funding)
 
     def _publish_snapshot(self, snap: DataSnapshot) -> SnapshotResult:
         store = self._store
@@ -1341,6 +1544,7 @@ class StoreWriter:
         conn = self._conn
         sid = snap.snapshot_id
         members = [(sid, m.dataset_id, m.data_version) for m in snap.members]
+        funding = [(sid, f.dataset_id, f.data_version) for f in snap.funding]     # v2 (SB-S4-a A2)
         with catalog.transaction(conn):
             row = conn.execute("SELECT snapshot_file_sha256, member_count FROM snapshots "
                                "WHERE snapshot_id = :sid", {"sid": sid}).fetchone()
@@ -1349,11 +1553,16 @@ class StoreWriter:
                              "VALUES (:sid, :sha, :n)", {"sid": sid, "sha": file_sha256, "n": len(members)})
                 conn.executemany("INSERT INTO snapshot_members (snapshot_id, dataset_id, data_version) "
                                  "VALUES (?, ?, ?)", members)
+                conn.executemany("INSERT INTO snapshot_funding_members (snapshot_id, dataset_id, data_version) "
+                                 "VALUES (?, ?, ?)", funding)
                 return
             have = [tuple(r) for r in conn.execute(
                 "SELECT snapshot_id, dataset_id, data_version FROM snapshot_members "
                 "WHERE snapshot_id = :sid ORDER BY dataset_id", {"sid": sid})]
-            if tuple(row) != (file_sha256, len(members)) or have != members:
+            have_funding = [tuple(r) for r in conn.execute(
+                "SELECT snapshot_id, dataset_id, data_version FROM snapshot_funding_members "
+                "WHERE snapshot_id = :sid ORDER BY dataset_id", {"sid": sid})]
+            if tuple(row) != (file_sha256, len(members)) or have != members or have_funding != funding:
                 raise catalog.CatalogCorruptError(f"snapshot {sid}: katalogen avviker")
 
     # -------------------------------------------------------------- ingest (steg 4)
@@ -1541,6 +1750,92 @@ class StoreWriter:
             if set(have) - synced:
                 raise catalog.CatalogCorruptError("katalogen har ingest_events som saknas i filerna")
 
+    # -------------------------------------------------------------- funding (etapp B steg 4)
+    def publish_funding(self, key: fd.FundingKey, files: list[str | Path] | tuple[str | Path, ...]
+                        ) -> FundingPublishResult:
+        """Funding-filerna -> oföränderlig version (eller full verifiering och återbruk) + katalograd.
+        Inga refs, ingen ref_log, ingen ingest-post (SB-S4-a A2); pinnas via create_snapshot."""
+        self._require_lock()
+        frame, sources, dropped = fd.build_funding_frame(list(files), key)      # läser bara indata
+        dv = fd.funding_content_hash(frame)
+        manifest = fd.funding_manifest(key, frame, sources, dropped)
+        store = self._store
+        target = store.funding_object_dir(key, dv)
+        if os.path.lexists(target):
+            info, stored, _ = store._verify_funding_object(key, dv)          # aldrig blint återbruk
+            if stored != json.loads(json.dumps(manifest)):
+                raise ProvenanceConflictError(
+                    f"{key.relpath}/{dv}: finns redan med andra källor; det lagrade manifestet skrivs aldrig om")
+            self._finish_dir(target)
+            self._register_funding(info, stored)
+            return FundingPublishResult(info, "reused", dropped)
+        staging = self._new_staging()
+        try:
+            staged = self._stage_funding(staging, key, frame, dv, manifest)
+            self._publish_dir(staged, target)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+        info, stored, _ = store._verify_funding_object(key, dv)
+        self._register_funding(info, stored)
+        return FundingPublishResult(info, "published", dropped)
+
+    def _stage_funding(self, staging: Path, key: fd.FundingKey, frame: pd.DataFrame, dv: str,
+                       manifest: dict[str, Any]) -> Path:
+        obj = staging / "object"
+        obj.mkdir()
+        fd.FundingParquet.write(obj / FUNDING_DATA_FILE, frame)
+        mbytes = canonical_json_bytes(manifest)
+        with (obj / MANIFEST_FILE).open("xb") as f:
+            f.write(mbytes)
+        version = {
+            "format": FUNDING_VERSION_FORMAT,
+            "dataset_id": catalog.funding_dataset_id(key),
+            "dataset": json.loads(catalog.funding_dataset_key_json(key)),
+            "data_version": dv,
+            "data_file": {"path": FUNDING_DATA_FILE, "sha256": sha256_file(obj / FUNDING_DATA_FILE),
+                          "bytes": (obj / FUNDING_DATA_FILE).stat().st_size},
+            "manifest": {"path": MANIFEST_FILE, "sha256": hashlib.sha256(mbytes).hexdigest(),
+                         "bytes": len(mbytes)},
+            "rows": manifest["rows"],
+            "first_calc_time": manifest["first_calc_time"],
+            "last_calc_time": manifest["last_calc_time"],
+        }
+        with (obj / VERSION_FILE).open("xb") as f:
+            f.write(canonical_json_bytes(version))
+        for fname in sorted(FUNDING_OBJECT_FILES):
+            os.chmod(obj / fname, FILE_MODE)
+            _fsync_file(obj / fname)
+        _fsync_dir(obj)
+        return obj
+
+    def _register_funding(self, info: FundingVersionInfo, manifest: dict[str, Any]) -> None:
+        """Katalograder för ett verifierat, durabelt funding-objekt (idempotent, EN transaktion)."""
+        row = funding_version_row(info, manifest)
+        sources = funding_source_rows(info, manifest)
+        ident = {"dataset_id": info.dataset_id, "data_version": info.data_version}
+        fv_cols, fvs_cols = ", ".join(_FV_COLUMNS), ", ".join(_FVS_COLUMNS)
+        conn = self._conn
+        with catalog.transaction(conn):
+            if catalog.ensure_funding_dataset(conn, info.key) != info.dataset_id:
+                raise catalog.CatalogCorruptError(f"{info.key.relpath}: dataset_id avviker")
+            existing = conn.execute(
+                f"SELECT {fv_cols} FROM funding_versions "
+                "WHERE dataset_id = :dataset_id AND data_version = :data_version", ident).fetchone()
+            if existing is None:
+                conn.execute(f"INSERT INTO funding_versions ({fv_cols}) "
+                             f"VALUES ({', '.join(':' + c for c in _FV_COLUMNS)})",
+                             dict(zip(_FV_COLUMNS, row, strict=True)))
+                conn.executemany(f"INSERT INTO funding_version_sources ({fvs_cols}) "
+                                 f"VALUES ({', '.join(':' + c for c in _FVS_COLUMNS)})",
+                                 [dict(zip(_FVS_COLUMNS, r, strict=True)) for r in sources])
+                return
+            have = [tuple(r) for r in conn.execute(
+                f"SELECT {fvs_cols} FROM funding_version_sources "
+                "WHERE dataset_id = :dataset_id AND data_version = :data_version ORDER BY source_index", ident)]
+            if tuple(existing) != row or have != sources:
+                raise catalog.CatalogCorruptError(
+                    f"{info.key.relpath}/{info.data_version}: katalograden matchar inte objektet")
+
 
 class PinnedStore:
     """Read-only vy över EXAKT en snapshots versioner. Följer aldrig refs, öppnar
@@ -1554,6 +1849,7 @@ class PinnedStore:
         self._store = store
         self._snapshot = snapshot
         self._pins = MappingProxyType({m.dataset_id: m for m in snapshot.members})
+        self._funding_pins = MappingProxyType({f.dataset_id: f for f in snapshot.funding})
 
     @property
     def snapshot(self) -> DataSnapshot:
@@ -1585,6 +1881,28 @@ class PinnedStore:
         pin = self.version_of(key)
         return self._store.read_range(pin.key, pin.data_version, start, end, as_of=as_of)
 
+    @property
+    def funding(self) -> tuple[FundingVersionRef, ...]:
+        return self._snapshot.funding
+
+    def funding_version_of(self, key: fd.FundingKey) -> FundingVersionRef:
+        pin = self._funding_pins.get(catalog.funding_dataset_id(key))
+        if pin is None:
+            raise DatasetNotInSnapshotError(f"funding-dataset {key.relpath} ingår inte i snapshot {self.snapshot_id}")
+        return pin
+
+    def read_funding(self, key: fd.FundingKey, *, as_of: datetime | None = None
+                     ) -> tuple[pd.DataFrame, dict[str, Any]]:
+        """Den pinnade funding-versionen (full verifiering); as_of -> available_at <= as_of."""
+        pin = self.funding_version_of(key)
+        return self._store.read_funding_version(pin.key, pin.data_version, as_of=as_of)
+
+    def read_funding_range(self, key: fd.FundingKey, start: datetime, end: datetime, *,
+                           as_of: datetime | None = None) -> tuple[pd.DataFrame, dict[str, Any]]:
+        """Den pinnade funding-versionen, [start, end) på calc_time (full verifiering)."""
+        pin = self.funding_version_of(key)
+        return self._store.read_funding_range(pin.key, pin.data_version, start, end, as_of=as_of)
+
     def _read_only(self, *args: Any, **kwargs: Any) -> None:
         raise ReadOnlyStoreError(f"PinnedStore {self.snapshot_id} är read-only")
 
@@ -1594,6 +1912,7 @@ class PinnedStore:
     snapshot_current = _read_only
     complete_pending_ref_updates = _read_only
     writer = _read_only
+    publish_funding = _read_only
 
 
 _INIT_ENTRIES = frozenset({LOCK_FILE, "objects", "tmp", CATALOG_FILE})
@@ -1652,3 +1971,31 @@ def _parse_sources(sources: Any) -> list[dict[str, Any]]:
 
 def _iso_to_ms(iso: str) -> int:
     return int(pd.Timestamp(iso).value // 1_000_000)
+
+
+def _parse_funding_sources(sources: Any) -> list[dict[str, Any]]:
+    """Funding-manifestets källor: icke-tom lista, exakt nycklarna, sorterade på (namn, sha256)."""
+    if not isinstance(sources, list) or not sources:
+        raise InvalidSourcesError("funding-manifestets 'sources' måste vara en icke-tom lista")
+    for s in sources:
+        if not (isinstance(s, dict) and set(s) == {"name", "sha256", "rows"}
+                and isinstance(s["name"], str) and s["name"] and catalog.is_sha256_hex(s["sha256"])
+                and _is_int(s["rows"]) and s["rows"] >= 1):
+            raise InvalidSourcesError(f"ogiltig källa i funding-manifestet: {s!r}")
+    keys = [(s["name"], s["sha256"]) for s in sources]
+    if keys != sorted(keys) or len({s["name"] for s in sources}) != len(sources):
+        raise InvalidSourcesError("funding-manifestets källor måste vara unika och sorterade")
+    return sources
+
+
+def funding_version_row(info: FundingVersionInfo, manifest: dict[str, Any]) -> tuple[Any, ...]:
+    """funding_versions-raden (samma i _register_funding och i integrity)."""
+    return (info.dataset_id, info.data_version, info.data_file_sha256, info.data_file_bytes,
+            info.manifest_sha256, info.version_sha256, int(manifest["schema_version"]), info.rows,
+            _iso_to_ms(info.first_calc_time), _iso_to_ms(info.last_calc_time),
+            int(manifest["duplicates_dropped"]))
+
+
+def funding_source_rows(info: FundingVersionInfo, manifest: dict[str, Any]) -> list[tuple[Any, ...]]:
+    return [(info.dataset_id, info.data_version, i, s["name"], s["sha256"], s["rows"])
+            for i, s in enumerate(_parse_funding_sources(manifest["sources"]))]

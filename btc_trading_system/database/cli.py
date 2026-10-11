@@ -20,8 +20,15 @@ KOMMANDON (--store krävs alltid; ingen standardrot, ingen miljövariabel)
   rebuild           --store P [--apply]                               integrity.rebuild_catalog_store
   complete-pending  --store P --kind ingest|ref [--apply]             complete_pending_ingest /
                                                                       complete_pending_ref_updates
+  migrate-catalog   --store P [--apply]                               VersionedStore.migrate_catalog
+  ingest-funding    --store P --dataset F FIL... [--apply]            StoreWriter.publish_funding
+  funding-versions  --store P --dataset F                             katalog (läs)
+  snapshot create   ... [--funding-member F@DV ...]                   snapshot v2 (funding pinnas explicit)
   D = binance/<instrument>/<SYMBOL>/<timeframe>, strikt kanonisk (catalog.dataset_key; normaliseras
-  aldrig). DV och ID = 64 hex (gemener).
+  aldrig). F = binance/perp/<SYMBOL>/funding (catalog.funding_dataset_key). DV och ID = 64 hex (gemener).
+
+ETAPP B STEG 4: migrate-catalog är det enda som migrerar en katalog (SB-S4-MIG); alla andra kommandon
+vägrar en katalog som kräver migrering (exit 5). Funding har inga refs eller ingest-poster (SB-S4-a A2).
 
 INGET SKRIVS UTAN --apply. Utan --apply visar varje muterande kommando en förhandsvisning byggd
 enbart av läsande biblioteksanrop (import-legacy, register-report, repair: bibliotekets egen
@@ -64,13 +71,18 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from btc_trading_system.core.types import require_utc
+from btc_trading_system.data import funding as fd
 from btc_trading_system.data import quality_cli
 from btc_trading_system.data.schema import DatasetKey
 from btc_trading_system.data_validation.errors import DataError
 from btc_trading_system.database import catalog, integrity, legacy
 from btc_trading_system.database import quality_registry as qreg
 from btc_trading_system.database import versioned_store as vs
-from btc_trading_system.database.refs import DatasetVersionRef, DataSnapshot
+from btc_trading_system.database.refs import (
+    DatasetVersionRef,
+    DataSnapshot,
+    FundingVersionRef,
+)
 
 CLI_FORMAT = "btc-quant/datastore-cli/v1"
 EXIT_OK = 0
@@ -80,9 +92,10 @@ EXIT_STORE_ERROR = 6
 EXIT_USAGE = 64
 EXIT_INTERNAL = 70
 REFUSED = (vs.StoreLockedError, vs.PendingRefUpdateError, vs.PendingIngestError,
-           vs.VersionRegressionError, integrity.RepairRefusedError)
+           vs.VersionRegressionError, integrity.RepairRefusedError, catalog.CatalogMigrationRequiredError)
 MUTATING = frozenset({"init", "import-legacy", "ingest", "set-current", "snapshot create",
-                      "register-report", "repair", "rebuild", "complete-pending"})
+                      "register-report", "repair", "rebuild", "complete-pending",
+                      "migrate-catalog", "ingest-funding"})
 Clock = Callable[[], datetime]
 GitState = Callable[[], tuple[str, bool | None]]
 
@@ -138,6 +151,23 @@ def _member(text: str) -> DatasetVersionRef:
     return DatasetVersionRef(_dataset(ds), _sha(dv))
 
 
+def _funding_dataset(text: str) -> fd.FundingKey:
+    parts = text.split("/")
+    if len(parts) != 4 or parts[3] != fd.FUNDING_KIND:
+        raise argparse.ArgumentTypeError(f"funding-dataset måste vara binance/perp/<SYMBOL>/funding: {text!r}")
+    try:
+        return catalog.funding_dataset_key(exchange=parts[0], instrument=parts[1], symbol=parts[2])
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"ogiltigt funding-dataset {text!r}: {e}") from e
+
+
+def _funding_member(text: str) -> FundingVersionRef:
+    ds, sep, dv = text.rpartition("@")
+    if not sep:
+        raise argparse.ArgumentTypeError(f"funding-medlem måste vara <funding-dataset>@<data_version>: {text!r}")
+    return FundingVersionRef(_funding_dataset(ds), _sha(dv))
+
+
 def _add_apply(p: argparse.ArgumentParser) -> None:
     p.add_argument("--apply", action="store_true", default=False,
                    help="utför ändringen (utan --apply skrivs ingenting)")
@@ -176,6 +206,7 @@ def _parser() -> argparse.ArgumentParser:
     form = p.add_mutually_exclusive_group(required=True)
     form.add_argument("--current", type=_dataset, action="append")
     form.add_argument("--member", type=_member, action="append")
+    p.add_argument("--funding-member", type=_funding_member, action="append", default=[])
     _add_apply(p)
     p = snap.add_parser("show", allow_abbrev=False)
     p.add_argument("--store", required=True)
@@ -187,6 +218,12 @@ def _parser() -> argparse.ArgumentParser:
     command("rebuild", apply=True)
     p = command("complete-pending", apply=True)
     p.add_argument("--kind", choices=("ingest", "ref"), required=True)
+    command("migrate-catalog", apply=True)
+    p = command("ingest-funding", apply=True)
+    p.add_argument("--dataset", type=_funding_dataset, required=True)
+    p.add_argument("files", nargs="+")
+    p = command("funding-versions", apply=False)
+    p.add_argument("--dataset", type=_funding_dataset, required=True)
     return ap
 
 
@@ -284,6 +321,8 @@ def _current_json(cur: vs.CurrentRef) -> dict[str, Any]:
 def _snapshot_out(snap: DataSnapshot, outcome: str | None) -> _Out:
     result: dict[str, Any] = {"snapshot_id": snap.snapshot_id,
                               "members": [m.to_json_obj() for m in snap.members]}
+    if snap.funding:                                  # v2; v1-utdata oförändrad
+        result["funding"] = [f.to_json_obj() for f in snap.funding]
     if outcome is not None:
         result["outcome"] = outcome
     return _Out(result, EXIT_OK, _sha256(snap.to_file_bytes()))
@@ -407,15 +446,16 @@ def _snapshot_create(a: argparse.Namespace, ctx: _Context) -> _Out:
                 members.append(cur.ref)
         else:
             members = list(a.member)
-        snap = DataSnapshot.of(members)
+        snap = DataSnapshot.of(members, a.funding_member)
         try:
             store.read_snapshot(snap.snapshot_id)
             outcome = "reused"
         except vs.SnapshotNotFoundError:
             outcome = "created"
         return _snapshot_out(snap, outcome)
+    funding = tuple(a.funding_member)
     with _writer(store) as w:
-        res = w.snapshot_current(a.current) if a.current is not None else w.create_snapshot(a.member)
+        res = w.snapshot_current(a.current, funding) if a.current is not None else w.create_snapshot(a.member, funding)
     return _snapshot_out(res.snapshot, res.outcome)
 
 
@@ -466,11 +506,53 @@ def _complete_pending(a: argparse.Namespace, ctx: _Context) -> _Out:
     return _Out({"kind": "ref", "completed": [_ref_update_json(u) for u in updates]}, EXIT_OK)
 
 
+def _migrate_catalog(a: argparse.Namespace, ctx: _Context) -> _Out:
+    res = vs.VersionedStore(a.store).migrate_catalog(apply=a.apply)
+    return _Out({"version_before": res.plan.version, "target": res.plan.target,
+                 "pending": [{"version": v, "name": n, "sql_sha256": h} for v, n, h in res.plan.pending],
+                 "migrated": res.applied, "version_after": res.version_after}, EXIT_OK)
+
+
+def _funding_version_json(info: vs.FundingVersionInfo) -> dict[str, Any]:
+    return {"dataset": info.key.relpath, "dataset_id": info.dataset_id, "data_version": info.data_version,
+            "rows": info.rows, "first_calc_time": info.first_calc_time, "last_calc_time": info.last_calc_time,
+            "data_file_sha256": info.data_file_sha256, "manifest_sha256": info.manifest_sha256,
+            "version_sha256": info.version_sha256}
+
+
+def _ingest_funding(a: argparse.Namespace, ctx: _Context) -> _Out:
+    store = vs.VersionedStore(a.store)
+    if not a.apply:                                   # förhandsvisning: läser bara indatafilerna
+        frame, sources, dropped = fd.build_funding_frame(list(a.files), a.dataset)
+        dv = fd.funding_content_hash(frame)
+        return _Out({"predicted": True, "dataset": a.dataset.relpath,
+                     "dataset_id": catalog.funding_dataset_id(a.dataset), "data_version": dv,
+                     "rows": len(frame), "duplicates_dropped": dropped,
+                     "sources": [s.to_json_obj() for s in sources],
+                     "exists": store.has_funding_version(a.dataset, dv)}, EXIT_OK)
+    with _writer(store) as w:
+        res = w.publish_funding(a.dataset, list(a.files))
+    return _Out({**_funding_version_json(res.info), "outcome": res.outcome,
+                 "duplicates_dropped": res.duplicates_dropped}, EXIT_OK, res.info.manifest_sha256)
+
+
+def _funding_versions(a: argparse.Namespace, ctx: _Context) -> _Out:
+    store = vs.VersionedStore(a.store)
+    conn = catalog.open_catalog(store.catalog_path, readonly=True)
+    try:
+        rows = catalog.list_funding_versions(conn, catalog.funding_dataset_id(a.dataset))
+    finally:
+        conn.close()
+    return _Out({"versions_from": "catalog", "dataset": a.dataset.relpath, "versions": rows}, EXIT_OK)
+
+
 HANDLERS: dict[str, Callable[[argparse.Namespace, _Context], _Out]] = {
     "init": _init, "import-legacy": _import_legacy, "ingest": _ingest, "list": _list,
     "versions": _versions, "set-current": _set_current, "snapshot create": _snapshot_create,
     "snapshot show": _snapshot_show, "register-report": _register_report, "verify": _verify,
     "repair": _repair, "rebuild": _rebuild, "complete-pending": _complete_pending,
+    "migrate-catalog": _migrate_catalog, "ingest-funding": _ingest_funding,
+    "funding-versions": _funding_versions,
 }
 
 

@@ -18,6 +18,9 @@ SÄKERHET
   * journal_mode=DELETE (rollback-journal, aldrig WAL), synchronous=FULL.
   * user_version + schema_migrations (sha256 av varje migrerings-SQL): nyare
     schema avvisas, manipulerad/partiell migrering avvisas.
+  * Migrering sker ALDRIG automatiskt när katalogen öppnas (inte heller skrivbart):
+    en katalog med äldre schema vägras (CatalogMigrationRequiredError) och migreras
+    bara explicit med migrate_catalog() (SB-S4-MIG, etapp B steg 4).
   * Faktiskt schema jämförs mot förväntat (sqlite_schema) vid varje öppning.
   * Alla tabeller utom refs är append-only (triggers blockerar UPDATE/DELETE);
     refs får bara uppdateras, aldrig raderas.
@@ -39,12 +42,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from btc_trading_system.data.funding import FUNDING_KIND, FundingKey
 from btc_trading_system.data.schema import EXCHANGE, DatasetKey
 from btc_trading_system.data_validation.errors import DataError
 
-CATALOG_SCHEMA_VERSION = 1
+CATALOG_SCHEMA_VERSION = 2
 MIN_SQLITE_VERSION = (3, 37, 0)                      # STRICT-tabeller
 DATASET_ID_DOMAIN = b"btc-quant/dataset-id/v1\x00"
+FUNDING_DATASET_ID_DOMAIN = b"btc-quant/funding-dataset-id/v1\x00"
 _SQLITE_HEADER = b"SQLite format 3\x00"
 
 # Låsta i schemat (CHECK). Test säkerställer att de matchar Phase 1-3-konstanterna.
@@ -68,6 +73,10 @@ class CatalogCorruptError(CatalogError):
 
 class CatalogMigrationError(CatalogError):
     """En migrering misslyckades; transaktionen rullades tillbaka, katalogen är orörd."""
+
+
+class CatalogMigrationRequiredError(CatalogVersionError):
+    """Katalogen har ett äldre, oskadat schema; den migreras bara med migrate_catalog()."""
 
 
 class UnsupportedSQLiteError(CatalogError):
@@ -99,6 +108,27 @@ def dataset_key_json(key: DatasetKey) -> str:
 
 def dataset_id(key: DatasetKey) -> str:
     return hashlib.sha256(DATASET_ID_DOMAIN + dataset_key_json(key).encode("ascii")).hexdigest()
+
+
+def funding_dataset_key(*, exchange: str, instrument: str, symbol: str) -> FundingKey:
+    """Strikt FundingKey från lagrade fält; indata måste redan vara kanonisk (som dataset_key)."""
+    key = FundingKey(instrument, symbol, exchange)  # type: ignore[arg-type]
+    if (key.exchange, key.instrument.value, key.symbol) != (exchange, instrument, symbol) or exchange != EXCHANGE:
+        raise ValueError(f"icke-kanonisk funding-nyckel: {(exchange, instrument, symbol)!r}")
+    return key
+
+
+def funding_dataset_key_json(key: FundingKey) -> str:
+    """Kanonisk representation; "kind" skiljer den från varje OHLCV-nyckel."""
+    if key.exchange != EXCHANGE:
+        raise ValueError(f"exchange {key.exchange!r} stöds inte (endast {EXCHANGE!r})")
+    return json.dumps({"exchange": key.exchange, "instrument": key.instrument.value, "kind": FUNDING_KIND,
+                       "symbol": key.symbol}, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def funding_dataset_id(key: FundingKey) -> str:
+    """Egen domäntagg: ett funding-id kan aldrig sammanfalla med ett OHLCV-dataset_id."""
+    return hashlib.sha256(FUNDING_DATASET_ID_DOMAIN + funding_dataset_key_json(key).encode("ascii")).hexdigest()
 
 
 def is_sha256_hex(value: object) -> bool:
@@ -285,8 +315,64 @@ class Migration:
         return hashlib.sha256(self.sql.encode("utf-8")).hexdigest()
 
 
+# Migration 2 (etapp B steg 4, SB-S4-a A2): funding-dataset. Bara nya tabeller; migration 1 är
+# fryst (P4-S1-08) och ingen av dess tabeller ändras. Inga refs, ingen ref_log och inga
+# ingest-poster för funding; funding-versioner pinnas via snapshots (format v2).
+_V2_TABLES = f"""
+CREATE TABLE funding_datasets (
+    dataset_id    TEXT PRIMARY KEY {_sha("dataset_id")},
+    exchange      TEXT NOT NULL {_in("exchange", (EXCHANGE,))},
+    instrument    TEXT NOT NULL {_in("instrument", ("perp",))},
+    symbol        TEXT NOT NULL CHECK (length(symbol) BETWEEN 5 AND 20
+                                       AND symbol NOT GLOB '*[^A-Z0-9]*'),
+    UNIQUE (exchange, instrument, symbol)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE funding_versions (
+    dataset_id          TEXT NOT NULL REFERENCES funding_datasets (dataset_id),
+    data_version        TEXT NOT NULL {_sha("data_version")},
+    data_file_sha256    TEXT NOT NULL {_sha("data_file_sha256")},
+    data_file_bytes     INTEGER NOT NULL CHECK (data_file_bytes > 0),
+    manifest_sha256     TEXT NOT NULL {_sha("manifest_sha256")},
+    version_sha256      TEXT NOT NULL {_sha("version_sha256")},
+    manifest_schema_version INTEGER NOT NULL CHECK (manifest_schema_version >= 1),
+    rows                INTEGER NOT NULL CHECK (rows >= 1),
+    first_calc_time_ms  INTEGER NOT NULL,
+    last_calc_time_ms   INTEGER NOT NULL,
+    duplicates_dropped  INTEGER NOT NULL CHECK (duplicates_dropped >= 0),
+    PRIMARY KEY (dataset_id, data_version),
+    CHECK (last_calc_time_ms >= first_calc_time_ms)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE funding_version_sources (
+    dataset_id    TEXT NOT NULL,
+    data_version  TEXT NOT NULL,
+    source_index  INTEGER NOT NULL CHECK (source_index >= 0),
+    name          TEXT NOT NULL CHECK (length(name) > 0),
+    sha256        TEXT NOT NULL {_sha("sha256")},
+    rows          INTEGER NOT NULL CHECK (rows >= 1),
+    PRIMARY KEY (dataset_id, data_version, source_index),
+    FOREIGN KEY (dataset_id, data_version) REFERENCES funding_versions (dataset_id, data_version)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE snapshot_funding_members (
+    snapshot_id   TEXT NOT NULL REFERENCES snapshots (snapshot_id),
+    dataset_id    TEXT NOT NULL,
+    data_version  TEXT NOT NULL,
+    PRIMARY KEY (snapshot_id, dataset_id),
+    FOREIGN KEY (dataset_id, data_version) REFERENCES funding_versions (dataset_id, data_version)
+) STRICT, WITHOUT ROWID;
+"""
+
+_V2_APPEND_ONLY = ("funding_datasets", "funding_versions", "funding_version_sources",
+                   "snapshot_funding_members")
+
+_V2_SQL = (_V2_TABLES.strip() + "\n\n"
+           + "\n".join(_append_only(t) for t in _V2_APPEND_ONLY) + "\n")
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial_catalog", _V1_SQL),
+    Migration(2, "funding_datasets", _V2_SQL),
 )
 
 
@@ -425,6 +511,14 @@ def check_catalog(conn: sqlite3.Connection, *, full: bool = False) -> list[str]:
             ok = False
         if not ok:
             problems.append(f"dataset_id {did} matchar inte {exch}/{inst}/{sym}/{tf}")
+    for did, exch, inst, sym in conn.execute(
+            "SELECT dataset_id, exchange, instrument, symbol FROM funding_datasets"):
+        try:
+            ok = funding_dataset_id(funding_dataset_key(exchange=exch, instrument=inst, symbol=sym)) == did
+        except ValueError:
+            ok = False
+        if not ok:
+            problems.append(f"funding dataset_id {did} matchar inte {exch}/{inst}/{sym}/{FUNDING_KIND}")
     return problems
 
 
@@ -444,18 +538,13 @@ def _open_existing(path: Path, readonly: bool) -> sqlite3.Connection:
             raise CatalogVersionError(
                 f"{path.name}: schemaversion {version} är nyare än stödd {len(MIGRATIONS)}")
         if version < len(MIGRATIONS):
-            if readonly:
-                raise CatalogVersionError(
-                    f"{path.name}: schemaversion {version} kräver migrering till {len(MIGRATIONS)}")
+            # Aldrig automatisk migrering, inte heller skrivbart (SB-S4-MIG): bara migrate_catalog().
             problems = _schema_problems(conn, version)
             if problems:
                 raise CatalogCorruptError(f"{path.name}: {problems}")
-            for m in MIGRATIONS[version:]:
-                try:
-                    _apply(conn, m)
-                except sqlite3.Error as e:
-                    raise CatalogMigrationError(
-                        f"{path.name}: migrering {m.version} ({m.name}) misslyckades: {e}") from e
+            raise CatalogMigrationRequiredError(
+                f"{path.name}: schemaversion {version} kräver migrering till {len(MIGRATIONS)} "
+                "(migrate_catalog; CLI: migrate-catalog --apply)")
         problems = check_catalog(conn)
         if problems:
             raise CatalogCorruptError(f"{path.name}: {problems}")
@@ -597,5 +686,100 @@ def list_datasets(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 def list_dataset_versions(conn: sqlite3.Connection, did: str) -> list[dict[str, Any]]:
     cur = conn.execute("SELECT * FROM dataset_versions WHERE dataset_id = ? "
                        "ORDER BY first_open_time_ms, last_open_time_ms, data_version", (did,))
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, r, strict=True)) for r in cur]
+
+
+# ------------------------------------------------------------------ explicit migrering (SB-S4-MIG)
+@dataclass(frozen=True)
+class MigrationPlan:
+    version: int                                     # katalogens user_version nu
+    target: int                                      # len(MIGRATIONS)
+    pending: tuple[tuple[int, str, str], ...]        # (version, namn, sql_sha256) som återstår
+
+
+@dataclass(frozen=True)
+class MigrationResult:
+    plan: MigrationPlan
+    applied: bool
+    version_after: int
+
+
+def plan_migration(path: str | Path) -> MigrationPlan:
+    """Läsande: katalogens schemaversion och återstående migreringar. Skrivs aldrig.
+    Saknad katalog, hot journal, nyare schema eller ett schema som inte är exakt migreringar
+    1..version -> fel (en skadad katalog migreras aldrig)."""
+    _require_sqlite()
+    path = Path(path)
+    if not path.exists():
+        raise CatalogError(f"katalog saknas: {path}")
+    journal = path.with_name(path.name + "-journal")
+    if journal.exists() and journal.stat().st_size > 0:
+        raise CatalogError(f"{path.name}: avbruten skrivning (hot journal); migrate_catalog(apply=True) "
+                           "rullar tillbaka den först")
+    _check_header(path)
+    conn = _connect(path, "ro")
+    try:
+        return _plan(conn, path)
+    finally:
+        conn.close()
+
+
+def _plan(conn: sqlite3.Connection, path: Path) -> MigrationPlan:
+    version = _user_version(conn)
+    if version > len(MIGRATIONS):
+        raise CatalogVersionError(f"{path.name}: schemaversion {version} är nyare än stödd {len(MIGRATIONS)}")
+    problems = _schema_problems(conn, version)
+    if problems:
+        raise CatalogCorruptError(f"{path.name}: {problems}")
+    return MigrationPlan(version, len(MIGRATIONS),
+                         tuple((m.version, m.name, m.sha256) for m in MIGRATIONS[version:]))
+
+
+def migrate_catalog(path: str | Path, *, apply: bool = False) -> MigrationResult:
+    """Explicit migrering till len(MIGRATIONS), dry-run som standard (SB-S4-MIG). Varje migrering
+    är en transaktion (_apply); efteråt full kontroll. Anroparen håller lagrets skrivarlås.
+    apply=True rullar först tillbaka en avbruten skrivning (SQLite, skrivbar öppning)."""
+    _require_sqlite()
+    path = Path(path)
+    if not apply:
+        plan = plan_migration(path)
+        return MigrationResult(plan, applied=False, version_after=plan.version)
+    if not path.exists():
+        raise CatalogError(f"katalog saknas: {path}")
+    conn = _connect(path, "rw")
+    try:
+        plan = _plan(conn, path)                     # ev. rollback av hot journal sker här
+        _check_header(path)
+        for m in MIGRATIONS[plan.version:]:
+            try:
+                _apply(conn, m)
+            except sqlite3.Error as e:
+                raise CatalogMigrationError(
+                    f"{path.name}: migrering {m.version} ({m.name}) misslyckades: {e}") from e
+        problems = check_catalog(conn, full=True)
+        if problems:
+            raise CatalogCorruptError(f"{path.name}: efter migrering: {problems}")
+        return MigrationResult(plan, applied=bool(plan.pending), version_after=_user_version(conn))
+    finally:
+        conn.close()
+
+
+def ensure_funding_dataset(conn: sqlite3.Connection, key: FundingKey) -> str:
+    """Registrerar funding-datasetet (idempotent) och returnerar dess dataset_id."""
+    did = funding_dataset_id(key)
+    fields = (key.exchange, key.instrument.value, key.symbol)
+    conn.execute("INSERT INTO funding_datasets (dataset_id, exchange, instrument, symbol) "
+                 "VALUES (?, ?, ?, ?) ON CONFLICT (dataset_id) DO NOTHING", (did, *fields))
+    row = conn.execute("SELECT exchange, instrument, symbol FROM funding_datasets "
+                       "WHERE dataset_id = ?", (did,)).fetchone()
+    if tuple(row) != fields:
+        raise CatalogCorruptError(f"funding dataset_id {did} är registrerat för {tuple(row)}")
+    return did
+
+
+def list_funding_versions(conn: sqlite3.Connection, did: str) -> list[dict[str, Any]]:
+    cur = conn.execute("SELECT * FROM funding_versions WHERE dataset_id = ? "
+                       "ORDER BY first_calc_time_ms, last_calc_time_ms, data_version", (did,))
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, r, strict=True)) for r in cur]

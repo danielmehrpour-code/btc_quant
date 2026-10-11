@@ -236,7 +236,8 @@ def test_codes_table_is_the_approved_scale():
         "QUALITY_CORRUPT": "ERROR", "QUALITY_TARGET_MISSING": "ERROR", "QUALITY_BINDING_MISMATCH": "ERROR",
         "PENDING_INGEST": "PENDING", "CATALOG_MISSING": "REPAIRABLE", "CATALOG_UNREADABLE": "REPAIRABLE",
         "CATALOG_NEWER_SCHEMA": "ERROR", "CATALOG_STRUCTURE": "REPAIRABLE", "CATALOG_BEHIND": "REPAIRABLE",
-        "CATALOG_CONFLICT": "ERROR", "TMP_LEFTOVER": "REPAIRABLE", "TMP_UNKNOWN": "WARN"}
+        "CATALOG_CONFLICT": "ERROR", "TMP_LEFTOVER": "REPAIRABLE", "TMP_UNKNOWN": "WARN",
+        "CATALOG_MIGRATION_REQUIRED": "PENDING"}                          # SB-S4-MIG
 
 
 @pytest.mark.parametrize("codes,expected", [
@@ -263,7 +264,7 @@ def test_clean_store_after_full_history(store, src):
     assert [s.check for s in r.scope] == list(ig.SCOPE_CHECKS)
     assert all(s.status == "performed" for s in r.scope)
     assert dict(r.counts) == {"datasets": 2, "ingests": 3, "objects_corrupt": 0, "objects_valid": 4,
-                              "imports": 0,
+                              "imports": 0, "funding_datasets": 0, "funding_objects_valid": 0,
                               "quality_reports": 0,
                               "ref_log_entries": 3, "refs": 2, "snapshots": 1, "tmp_entries": 0}
     assert r.catalog_dump_sha256 == hashlib.sha256(dump(store).encode("ascii")).hexdigest()
