@@ -13,7 +13,7 @@ Most hobby trading bots fail because of look-ahead bias, overfitting and ignorin
 - **Reproducibility**: downloaded files are checked against the source's published checksums and kept unchanged in read-only archives; the datastore is versioned and immutable, and backtests read only through pinned snapshots, never "latest data".
 - **Data quality reports**: gap, duplicate, invariant and anomaly checks with locked thresholds; findings are reported, never silently fixed, and a FAIL stays a FAIL.
 - **Testing**: unit tests, hand-calculated cases with exact expected values, and mutation testing that proves the tests catch deliberately injected bugs.
-- **Benchmark in SEK and Swedish tax model** (in progress, stage B step 5): an MSCI World UCITS ETF converted with the Riksbank's USD/SEK rate, with brokerage, FX fee and spread; ISK standard-income tax including the 2025/2026 basic-level deduction, and crypto capital-gains rules, each rule referenced to the Income Tax Act (SFS 1999:1229). A comparison model only, not tax advice.
+- **Benchmark in SEK and Swedish tax model** (stage B step 5; implemented; data fetch pending (USD/SEK separate step, fund NAV awaiting provider permission)): an MSCI World UCITS ETF converted with the Riksbank's USD/SEK rate, with brokerage, FX fee and spread; ISK standard-income tax including the 2025/2026 basic-level deduction, and crypto capital-gains rules, each rule referenced to the Income Tax Act (SFS 1999:1229). A comparison model only, not tax advice.
 
 ## Architecture
 ```
@@ -34,7 +34,7 @@ data.binance.vision ──> scripts/data/fetch_binance.py ──> ~/btc_data/bin
   (quality reports: scripts/data_quality_report.py)  features, backtesting, strategies,
                                                       risk: placeholders today)
                                                                     │
-  benchmark + tax model (stage B step 5, in progress) ──> evaluation <┘
+  benchmark + tax model (stage B step 5, implemented) ──> evaluation <┘
                                                        (locked, hashed config; gates)
 ```
 Configuration lives in `configs/` (`default.yaml` holds the locked data split). The documents in `docs/` are authoritative (`docs/MASTER_SPEC.md`, `docs/ROADMAP.md`, `docs/DECISIONS.md`); this README is only a summary.
@@ -64,7 +64,7 @@ Market and fund data are not in the repository. They are kept in read-only store
 ## Roadmap
 Stages from `docs/ROADMAP.md`:
 - [x] A: close Phase 4 (versioned datastore, verified; tag `phase4-verified`)
-- [ ] B: data and preconditions (in progress: archive download, data split and funding done; SEK benchmark and tax model in progress; ingest, quality reports and venue choice to follow)
+- [ ] B: data and preconditions (in progress: archive download, data split and funding done; SEK benchmark and tax model implemented, data fetch pending (USD/SEK separate step, fund NAV awaiting provider permission); ingest, quality reports and venue choice to follow)
 - [ ] C: thin end-to-end slice
 - [ ] D: edge test of 10–20 pre-registered hypotheses on VALIDATION
 - [ ] E: deepen, then a single run on FINAL TEST

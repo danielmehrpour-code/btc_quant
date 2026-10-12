@@ -1,0 +1,37 @@
+# configs/benchmark_v1.yaml — LÅST (etapp B steg 5, SB-S5-a/b/f/g). Ändring kräver synligt beslut + uppdaterad hash i test.
+# Definitionerna låses före datan (MASTER_SPEC 1.3 p. 2); datans sha256 står i configs/benchmark_pins_v1.yaml.
+# Fondens identitet och kostnader läses härifrån, aldrig ur kod, så att ett fondbyte bara blir en konfigurations-
+# och beslutsändring (ägaren 2026-10-12).
+version: 1
+fund:
+  name: "iShares Core MSCI World UCITS ETF USD (Acc)"
+  isin: "IE00B4L5Y983"
+  index: "MSCI World Index (Net)"
+  currency: "USD"
+  ter: "0.0020"
+  accumulating: true
+  account: "ISK"
+  # NAV-publiceringstiden är OVERIFIERAD: konservativt NAV-datum + 1 dag kl. 09:00 Europe/Stockholm.
+  nav_available: {days_after: 1, time: "09:00", tz: "Europe/Stockholm"}
+  # SB-S5-b: data hämtas bara enligt denna ordning; ändras aldrig efter att data setts.
+  data_order: ["A: written permission from BlackRock by 2026-10-26",
+               "C: MSCI World Net levels + SEKUSDPMI, fee 0.0020/year, only if MSCI terms allow private storage",
+               "stop: new owner question"]
+fx:
+  source: "riksbank"
+  series: "SEKUSDPMI"
+  scale_exponent: 6                # lagras som heltal i enheter av 1e-6 SEK per USD
+  # Publiceringstiden är OVERIFIERAD (Q-E): observationsdatum + 1 dag kl. 00:00 Europe/Stockholm.
+  available: {days_after: 1, time: "00:00", tz: "Europe/Stockholm"}
+costs:
+  # Avanza, prislista för utlandshandel, läst 2026-10-12 (Storbritannien, Mini; växling 0,25 % per riktning).
+  # half_spread_rate är ett uttryckligt antagande utan källa (täcker även premie/rabatt mot NAV).
+  fx_fee_rate: "0.0025"
+  commission_rate: "0.0025"
+  half_spread_rate: "0.0005"
+  stress_multiplier: "2"
+quality:
+  gap_max_days: 5                  # luckor <= 5 kalenderdagar fylls bakåt och flaggas; längre = FAIL
+  nav_jump_threshold: "0.15"       # |NAV_t / NAV_(t-1) - 1| > 0,15 flaggas (låst före all hämtning, P3-02)
+capital_sek: "50000"               # MASTER_SPEC 1.3 p. 1; samma startkapital för alla alternativ
+cash_interest_rate: "0"            # kontanter: 0 % ränta (antagande)

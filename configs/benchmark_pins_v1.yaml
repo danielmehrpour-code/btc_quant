@@ -1,0 +1,5 @@
+# configs/benchmark_pins_v1.yaml — sha256 för kanoniska jämförelsefiler (SB-S5-c). Tom tills datan hämtats
+# (USD/SEK i ett eget steg; K2:s NAV bara efter BlackRocks skriftliga tillstånd, SB-S5-b).
+# Varje post: <namn>: {path: <relativ sökväg i arkivets canonical/>, sha256: <64 hex>}. Ändras bara genom beslut.
+version: 1
+pins: {}

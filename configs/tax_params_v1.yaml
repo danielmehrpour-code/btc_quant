@@ -1,0 +1,32 @@
+# configs/tax_params_v1.yaml — LÅST (etapp B steg 5, SB-S5-d). Ändring kräver synligt beslut + uppdaterad hash i test.
+# Jämförelsemodell, inte skatterådgivning (MASTER_SPEC 1.2 p. 8, 1.3 p. 2). Alla belopp och satser som strängar
+# (exakta decimaltal). IL = inkomstskattelagen (SFS 1999:1229), läst på riksdagen.se 2026-10-12.
+# SLR = statslåneräntan vid utgången av november året före inkomståret (Riksgälden, pressmeddelande per år:
+# https://www.riksgalden.se/press-och-publicerat/pressmeddelanden-och-nyheter/nyheter/<år>/statslanerantan-per-den-30-november-<år>/,
+# för 2025 katalogen 20252). schablon_rate = max(SLR + spread, floor) kontrolleras vid laddning (IL 42 kap. 36 §)
+# och mot Skatteverkets tabell (https://www.skatteverket.se/investeringssparkonto), läst 2026-10-12.
+version: 1
+rates:
+  capital_tax: {value: "0.30", basis: "IL 65 kap. 7 §", verified: "2026-10-12"}
+  isk_floor: {value: "0.0125", basis: "IL 42 kap. 36 §", verified: "2026-10-12"}
+  isk_spread_over_slr: {value: "0.01", basis: "IL 42 kap. 36 §", verified: "2026-10-12"}
+  loss_deductible_share: {value: "0.70", basis: "IL 52 kap. 5 §", verified: "2026-10-12"}
+  deficit_reduction_low: {value: "0.30", basis: "IL 67 kap. 10 §", verified: "2026-10-12"}
+  deficit_reduction_high: {value: "0.21", basis: "IL 67 kap. 10 §", verified: "2026-10-12"}
+  deficit_threshold_sek: {value: "100000", basis: "IL 67 kap. 10 §", verified: "2026-10-12"}
+income_years:
+  # deduction_cap_sek: takbelopp för avdraget (grundnivå), IL 42 kap. 45 och 48 §§ (Lag 2024:1131 / 2024:1132); 0 före 2025.
+  2020: {slr_30nov_prev: "-0.0009", schablon_rate: "0.0125", deduction_cap_sek: "0", verified: "2026-10-12"}
+  2021: {slr_30nov_prev: "-0.0010", schablon_rate: "0.0125", deduction_cap_sek: "0", verified: "2026-10-12"}
+  2022: {slr_30nov_prev: "0.0023", schablon_rate: "0.0125", deduction_cap_sek: "0", verified: "2026-10-12"}
+  2023: {slr_30nov_prev: "0.0194", schablon_rate: "0.0294", deduction_cap_sek: "0", verified: "2026-10-12"}
+  2024: {slr_30nov_prev: "0.0262", schablon_rate: "0.0362", deduction_cap_sek: "0", verified: "2026-10-12"}
+  2025: {slr_30nov_prev: "0.0196", schablon_rate: "0.0296", deduction_cap_sek: "150000", verified: "2026-10-12"}
+  2026: {slr_30nov_prev: "0.0255", schablon_rate: "0.0355", deduction_cap_sek: "300000", verified: "2026-10-12"}
+current_rules_year: 2026          # läget current_2026 (SB-S5-e): detta års regler gäller varje inkomstår
+owner:
+  # Ägarens svar 2026-10-12 (F-6, SB-S5-IMPL1, Q-G, F-9). null = inte angivet; ett inkomstår utan värde ger fel.
+  other_isk_kf_capital_sek: {2020: "0", 2021: "0", 2022: "0", 2023: "0", 2024: "0", 2025: "0", 2026: "0"}
+  other_capital_income_sek: "0"    # förenkling (Q-G): några kronor i utdelning
+  deficit_absorbable: false        # bas = stressfall S-ii (F-9); känsligheten sätter true
+  deficit_carry_forward: false     # OVERIFIERAT (ingen bestämmelse hittad); modellen för aldrig vidare

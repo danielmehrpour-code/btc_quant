@@ -125,3 +125,25 @@ python scripts/data/fetch_binance.py recheck --root ~/btc_data/binance_archive_v
   `revisions/` och den läses in först efter ägarens beslut (D-B-e).
 * Förteckningen `inventory/<sha256>.json` är deterministisk (inga tidpunkter); tider och kodversion
   finns bara i `runs/` (SB-S2-b).
+
+## 9. Etapp B: jämförelsedata (`scripts/data/fetch_benchmark.py`)
+Verktyget hämtar jämförelsedatan för G-23 (SB-S5-a..c): i dag bara Riksbankens USD/SEK (`SEKUSDPMI`,
+2019-12-01 till 2026-09-30) från `https://api.riksbank.se/`. K2:s NAV läggs till först efter
+BlackRocks skriftliga tillstånd, som ett eget beslut (SB-S5-b); inga iShares-värdar finns i allowlisten.
+Arkivet ligger i `~/btc_data/benchmark_archive_v1` och skrivs bara av verktyget (SB-S5-c).
+```bash
+python scripts/data/fetch_benchmark.py plan    --root ~/btc_data/benchmark_archive_v1          # offline
+python scripts/data/fetch_benchmark.py fetch   --root ~/btc_data/benchmark_archive_v1 --apply  # hämtar det som saknas
+python scripts/data/fetch_benchmark.py build   --root ~/btc_data/benchmark_archive_v1 --apply  # kanoniska filer
+python scripts/data/fetch_benchmark.py verify  --root ~/btc_data/benchmark_archive_v1          # offline, full kontroll
+python scripts/data/fetch_benchmark.py recheck --root ~/btc_data/benchmark_archive_v1 --apply  # reviderade svar (D-B-e)
+```
+* Exit som `fetch_binance.py`: 0 komplett; 1 ofullständigt; 2 `recheck` fann en skillnad; 3 ERROR;
+  5 vägrat (bland annat `--apply` med oren arbetskatalog); 64 användning; 70 internt.
+* Ett svar lagras oförändrat (`objects/<källa>/<serie>/<från>_<till>/response.json`) bara om det går att
+  tolka som en SWEA-serie; utdata visar antal och hash, aldrig värden.
+* `build` skriver `canonical/<källa>-<serie>.csv` (exakta heltal, 10^-6 SEK per USD). Dess sha256 förs in i
+  `configs/benchmark_pins_v1.yaml` genom beslut; varje utvärdering läser filen via `benchmark.pins.read_pinned`.
+* Ett ändrat svar skriver aldrig över originalet: `recheck --apply` sparar det under `revisions/` (D-B-e).
+* Varje värde får `available_at` = observationsdatum + 1 dag kl. 00:00 Europe/Stockholm tills
+  publiceringstiden är belagd (SB-S5-a); metodbytet 2023-11-27 (Nasdaq till ECB) ligger i TRAIN.

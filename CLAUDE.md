@@ -46,6 +46,7 @@ and ask the owner; never choose yourself.
   the exact diff before touching them.
 - The Phase 2/3 stores under `~/btc_data` stay read-only forever; `~/btc_data/datastore_v1` is written only through the committed CLI or library with `--apply` after owner approval.
 - `~/btc_data/binance_archive_v1` is written only by `scripts/data/fetch_binance.py` with `--apply` (SB-S2-a); never by hand.
+- `~/btc_data/benchmark_archive_v1` is written only by `scripts/data/fetch_benchmark.py` with `--apply` (SB-S5-c); never by hand.
 - Never adjust locked thresholds or splits after seeing real data (P1-04, P3-01, P3-02).
 - `phase*-verified` tags are never moved or deleted.
 - Backtests and research read through a snapshot (`PinnedStore`), never `read_current` (P4-S3-D4).
